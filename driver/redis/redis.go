@@ -1,35 +1,32 @@
 // Package redis implements a distributed rate limiting driver using Redis as the backend.
-// It relies on Redis sorted sets and Lua scripting to implement a precise, sliding-window
-// rate limiter across distributed services.
+// It relies on atomic Redis Lua scripts provided by pluggable algorithm strategies
+// to enforce rate limits consistently across distributed microservices.
 package redis
 
 import (
 	"context"
 	"fmt"
-	"math"
-	"strconv"
 	"time"
 
-	"github.com/balramadan/distlimit"
+	"github.com/balramadan/distlimit/algorithm"
 	"github.com/redis/go-redis/v9"
 )
 
-// Driver implements the distlimit.Driver interface. It communicates with a Redis backend
-// using a UniversalClient (supporting standalone, cluster, or sentinel Redis deployments).
-// All rate limit operations are executed atomically in Redis via a sliding-window Lua script.
+// Driver implements the distlimit.Driver interface using Redis as the storage backend.
+// All rate limit operations execute atomically in Redis via algorithm-specific Lua scripts.
 //
-// Driver is safe for concurrent use by multiple goroutines.
+// Driver is thread-safe and safe for concurrent use by multiple goroutines.
 type Driver struct {
 	client redis.UniversalClient
 	prefix string
 }
 
-// Option configures functional parameters for the redis Driver.
+// Option configures functional parameters for the Redis Driver.
 type Option func(*Driver)
 
 // WithPrefix sets a custom key prefix for all rate limit keys stored in Redis.
-// This is useful for namespacing and avoiding key collisions.
-// The default prefix is "distlimit:".
+// This is useful for namespacing and avoiding key collisions across environments or services.
+// The default prefix is "distlimit".
 func WithPrefix(prefix string) Option {
 	return func(d *Driver) {
 		d.prefix = prefix
@@ -40,7 +37,7 @@ func WithPrefix(prefix string) Option {
 func New(client redis.UniversalClient, opts ...Option) *Driver {
 	d := &Driver{
 		client: client,
-		prefix: "distlimit:",
+		prefix: "distlimit",
 	}
 
 	for _, opt := range opts {
@@ -50,56 +47,63 @@ func New(client redis.UniversalClient, opts ...Option) *Driver {
 	return d
 }
 
-// Allow evaluates the rate limit for a key using a sliding window algorithm.
-// It executes a Redis Lua script to clean up expired timestamps, check the request limit against
-// the current window volume, add the current request timestamp if allowed, and return the result.
-func (d *Driver) Allow(ctx context.Context, key string, limit int64, window time.Duration) (distlimit.Result, error) {
-	fullKey := d.prefix + key
-	now := time.Now()
-	nowNs := now.UnixNano()
-	windowNs := window.Nanoseconds()
+// Allow evaluates the rate limit for a key using the Lua script provided by the algorithm strategy.
+// It sends evaluation parameters (limit, window, current timestamp) to Redis and parses the response.
+func (d *Driver) Allow(ctx context.Context, key string, limit int64, window time.Duration, alg algorithm.Algorithm) (algorithm.Result, error) {
+	redisKey := fmt.Sprintf("%s:{%s}", d.prefix, key)
 
-	memberID := fmt.Sprintf("%d-%d", nowNs, now.Nanosecond())
-
-	ttlSec := int64(math.Ceil(window.Seconds())) * 2
-	if ttlSec < 1 {
-		ttlSec = 1
+	nowMs := time.Now().UnixMilli()
+	windowMs := window.Milliseconds()
+	if windowMs < 1 {
+		windowMs = 1
 	}
 
-	keys := []string{fullKey}
-	args := []interface{}{
-		strconv.FormatInt(nowNs, 10),
-		strconv.FormatInt(windowNs, 10),
-		strconv.FormatInt(limit, 10),
-		memberID,
-		strconv.FormatInt(ttlSec, 10),
-	}
+	// Retrieve the algorithm-specific atomic Lua script
+	script := alg.RedisScript()
 
-	rawRes, err := slidingScript.Run(ctx, d.client, keys, args...).Result()
+	// Execute the Lua script in Redis atomically
+	evalRes, err := d.client.Eval(ctx, script, []string{redisKey}, limit, windowMs, nowMs).Result()
 	if err != nil {
-		return distlimit.Result{}, fmt.Errorf("distlimit/redis: %w", err)
+		return algorithm.Result{}, fmt.Errorf("distlimit redis: %w", err)
 	}
 
-	resArray, ok := rawRes.([]interface{})
-	if !ok || len(resArray) < 3 {
-		return distlimit.Result{}, fmt.Errorf("distlimit/redis: Invalid lua response format")
+	// Parse the array response returned by the Lua script
+	vals, ok := evalRes.([]interface{})
+	if !ok || len(vals) < 3 {
+		return algorithm.Result{}, fmt.Errorf("distlimit redis: invalid script response format")
 	}
 
-	allowed := resArray[0].(int64) == 1
-	remaining := resArray[1].(int64)
-	resetInNs := resArray[2].(int64)
+	allowedVal, ok1 := toInt64(vals[0])
+	remainingVal, ok2 := toInt64(vals[1])
+	resetMsVal, ok3 := toInt64(vals[2])
 
-	return distlimit.Result{
-		Allowed:   allowed,
+	if !ok1 || !ok2 || !ok3 {
+		return algorithm.Result{}, fmt.Errorf("distlimit redis: failed to parse script response values")
+	}
+
+	return algorithm.Result{
+		Allowed:   allowedVal == 1,
 		Limit:     limit,
-		Remaining: remaining,
-		ResetIn:   time.Duration(resetInNs),
+		Remaining: remainingVal,
+		ResetIn:   time.Duration(resetMsVal) * time.Millisecond,
 	}, nil
 }
 
-// Close implements the distlimit.Driver interface.
-// For Redis, the client lifecycle is typically managed outside of this driver,
-// so this method is a no-op that returns nil.
+// toInt64 safely converts dynamic numerical types returned by Redis response drivers to int64.
+func toInt64(val interface{}) (int64, bool) {
+	switch v := val.(type) {
+	case int64:
+		return v, true
+	case int:
+		return int64(v), true
+	case float64:
+		return int64(v), true
+	default:
+		return 0, false
+	}
+}
+
+// Close closes the underlying Redis client connection pool.
 func (d *Driver) Close(ctx context.Context) error {
-	return nil
-} 
+	return d.client.Close()
+}

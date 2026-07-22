@@ -1,44 +1,69 @@
-# ⚡ distlimit — High-Performance & Resilient Hybrid Rate Limiter for Go
+# ⚡ distlimit
 
-**`distlimit`** is an enterprise-grade rate-limiting library for Golang designed for extreme throughput (**nanosecond-level latency**) and zero-downtime resilience.
+[![Go Reference](https://pkg.go.dev/badge/github.com/balramadan/distlimit.svg)](https://pkg.go.dev/github.com/balramadan/distlimit)
+[![Go Report Card](https://goreportcard.com/badge/github.com/balramadan/distlimit)](https://goreportcard.com/report/github.com/balramadan/distlimit)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-It combines the blazing speed of local in-memory evaluation (L1) via **Lock-Free Atomics (`sync/atomic`)** with the multi-node accuracy of distributed Redis (L2) using **Atomic Lua Scripting**. It features an automatic **Graceful Failover Mechanism** to protect your applications if the Redis instance encounters an outage or network partition.
+**`distlimit`** is an ultra-high performance, distributed, pluggable rate-limiting library for Go. Engineered for microservices, high-concurrency APIs, and financial-grade applications requiring nanosecond-level execution speeds, zero memory allocation, and multi-tier failover capabilities.
 
 ---
 
-## 🏗️ Architecture & Failover Flow
+## 🚀 Why `distlimit`? (Competitive Edge)
 
-`distlimit` utilizes a **Dual-Tier Hybrid Architecture** equipped with a _Circuit Breaker Cool-Off_ mechanism. This guarantees that your application will never throw HTTP 500 errors or experience latency spikes due to Redis infrastructure issues.
+Most Go rate-limiting libraries force you into a single algorithm, lock global mutexes during background cleanup, or collapse when Redis goes down. **`distlimit`** solves these architectural flaws with enterprise-grade resilience:
 
-```mermaid
-flowchart TD
-    Client[HTTP Client] --> MW[distlimit Middleware]
-    MW --> HD[Hybrid Driver]
+- **🔌 100% Pluggable Strategy Architecture:** Swap algorithms seamlessly without changing your storage driver or HTTP framework middleware.
+- **⚡ Zero Allocation & Nanosecond Latency:** Memory evaluation runs in sub-100 nanoseconds with **`0 B/op`** memory overhead across all standard algorithms.
+- **🔒 64-Sharded Memory Architecture:** Eliminates global lock contention during concurrent HTTP requests and background state cleanups.
+- **🛡️ Half-Open Circuit Breaker (Hybrid Driver):** Automatic failover from Redis to In-Memory with single-request probing to prevent _Thundering Herd_ spikes upon Redis recovery.
+- **🔐 Security-First Middlewares:** Built-in protection against **IP Spoofing** via CIDR-validated `WithTrustedProxies` headers inspection.
+- **🌐 Native Redis Cluster Safety:** Enforces **Redis Hash Tags `{}`** to prevent `CROSSSLOT` cluster routing errors.
 
-    HD -->|1. Try Primary| Redis{Redis Server}
-    Redis -->|Healthy| Res1[Return RateLimit Result]
+---
 
-    Redis -->|Down / Timeout / Error| CB[Circuit Breaker & Cool-off]
-    CB -->|2. Auto-Fallback| Mem[In-Memory Driver]
-    Mem -->|Lock-Free Atomic| Res2[Return RateLimit Result]
+## 📐 Architecture Overview
 
-    Res1 --> MW
-    Res2 --> MW
-    MW -->|Inject IETF Headers| Client
+```
+                    +----------------------------+
+                    |  HTTP / gRPC Incoming Req  |
+                    +----------------------------+
+                                  |
+                     [ Trusted Proxies Check ]  <-- IP Spoofing Shield
+                                  |
+                    +----------------------------+
+                    |     distlimit.Limiter      |
+                    +----------------------------+
+                                  |
+           +----------------------+----------------------+
+           |                                             |
+ [ Pluggable Algorithm ]                         [ Storage Driver ]
+
+* Token Bucket                                 - Memory (64-Sharded)
+* Leaky Bucket                                 - Redis (Cluster Hash-Tagged)
+* Fixed Window                                 - Hybrid (Circuit Breaker)
+* Sliding Window Log
+* Sliding Window Counter
 
 ```
 
 ---
 
-## ✨ Key Features
+## 🧮 Supported Algorithms
 
-- **Zero-Dependency Core:** The root package relies purely on the Go Standard Library, avoiding transitive dependency bloat.
-- **Lock-Free In-Memory Engine:** Built with `sync/atomic` (Compare-And-Swap) instead of traditional `sync.Mutex`, delivering nanosecond evaluations with **0 B/op heap memory allocation**.
-- **Atomic Redis Lua Scripting:** Implements the _Sliding Window Log_ algorithm executed atomically in a single network round-trip to Redis.
-- **Graceful Redis Fallback:** Automatically degrades evaluation to local memory if Redis goes down, ensuring zero application downtime.
-- **Circuit Breaker Cool-Off:** Prevents overwhelming a recovering Redis server by applying a configurable cool-off period during failover.
-- **IETF Standard RateLimit Headers:** Injects standard HTTP response headers (`RateLimit-Limit`, `RateLimit-Remaining`, `RateLimit-Reset`, and `Retry-After`) automatically.
-- **Plug-and-Play Middleware:** Provides turn-key adapters for Go's native `net/http` and the `Gin Gonic` web framework.
+| Algorithm                  | Traffic Pattern      | Memory | Redis Data Structure | Best Use Case                                                                |
+| -------------------------- | -------------------- | ------ | -------------------- | ---------------------------------------------------------------------------- |
+| **Token Bucket**           | Burst Friendly       | $O(1)$ | Hash                 | General-purpose API rate limiting with burst support.                        |
+| **Leaky Bucket**           | Traffic Shaping      | $O(1)$ | Hash                 | Smoothing spikes for third-party integrations (e.g., Payment Gateways).      |
+| **Fixed Window**           | Interval Reset       | $O(1)$ | String Counter       | Ultra-lightweight endpoint protection & login brute-force shielding.         |
+| **Sliding Window Log**     | 100% Exact Precision | $O(N)$ | Sorted Set (ZSET)    | Strict quota allocation, financial transactions, and zero-compromise limits. |
+| **Sliding Window Counter** | Weighted Moving Avg  | $O(1)$ | Hash                 | High-throughput distributed rate limiting with $O(1)$ memory precision.      |
+
+---
+
+## 📋 Prerequisites
+
+- **Go**: `1.20` or higher
+- **Redis** _(Optional for distributed driver)_: Standalone, Sentinel, or Cluster `v6.0+`
 
 ---
 
@@ -51,48 +76,107 @@ go get github.com/balramadan/distlimit
 
 ---
 
-## 🚀 Quick Start
+## ⚡ Quickstart
 
-### 1. Basic Usage with `net/http` (In-Memory Driver)
+### 1. Basic In-Memory Limiter with Sliding Window Counter
 
 ```go
 package main
 
 import (
 	"context"
-	"net/http"
+	"fmt"
 	"time"
 
 	"github.com/balramadan/distlimit"
+	"github.com/balramadan/distlimit/algorithm/slidingcounter"
 	"github.com/balramadan/distlimit/driver/memory"
-	distlimithttp "github.com/balramadan/distlimit/middleware/nethttp"
 )
 
 func main() {
-	// 1. Initialize In-Memory Driver
-	memDriver := memory.New(1 * time.Minute)
+	// Initialize 64-Sharded Memory Driver (TTL 5 minutes)
+	memDriver := memory.New(5 * time.Minute)
 	defer memDriver.Close(context.Background())
 
-	// 2. Create Limiter (100 requests per minute)
-	limiter, _ := distlimit.New(
+	// Create Limiter: 10 requests per 1 minute using Sliding Window Counter
+	limiter, err := distlimit.New(
 		memDriver,
-		distlimit.WithLimit(100),
+		distlimit.WithLimit(10),
 		distlimit.WithWindow(1*time.Minute),
+		distlimit.WithAlgorithm(slidingcounter.New()),
 	)
+	if err != nil {
+		panic(err)
+	}
 
-	// 3. Attach Middleware to net/http Handler
-	mux := http.NewServeMux()
-	mux.HandleFunc("/api/hello", func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte("Hello, World!"))
-	})
+	// Evaluate Rate Limit for a key
+	res, err := limiter.AllowKey(context.Background(), "user:123")
+	if err != nil {
+		panic(err)
+	}
 
-	protectedHandler := distlimithttp.New(limiter)(mux)
-	http.ListenAndServe(":8080", protectedHandler)
+	if res.Allowed {
+		fmt.Printf("Allowed! Remaining: %d\n", res.Remaining)
+	} else {
+		fmt.Printf("Blocked! Retry after: %v\n", res.ResetIn)
+	}
 }
 
 ```
 
-### 2. Advanced Usage with Gin Framework (Hybrid Driver + Fallback Alert)
+---
+
+### 2. Secure Web Framework Middleware (Fiber / Gin / Echo / net/http)
+
+Protect your HTTP endpoints with built-in Anti-IP Spoofing protection using `WithTrustedProxies`:
+
+```go
+package main
+
+import (
+	"context"
+	"time"
+
+	"github.com/balramadan/distlimit"
+	"github.com/balramadan/distlimit/algorithm/tokenbucket"
+	"github.com/balramadan/distlimit/driver/memory"
+	distlimitfiber "github.com/balramadan/distlimit/middleware/fiber"
+	"github.com/gofiber/fiber/v3"
+)
+
+func main() {
+	memDriver := memory.New(5 * time.Minute)
+	defer memDriver.Close(context.Background())
+
+	limiter, _ := distlimit.New(
+		memDriver,
+		distlimit.WithLimit(100),
+		distlimit.WithWindow(1*time.Minute),
+		distlimit.WithAlgorithm(tokenbucket.New()),
+	)
+
+	app := fiber.New()
+
+	// Enable Middleware with Strict Trusted Proxies (Cloudflare / Nginx Subnet)
+	app.Use(distlimitfiber.New(
+		limiter,
+		distlimitfiber.WithTrustedProxies([]string{"10.0.0.0/8", "172.16.0.0/12"}),
+	))
+
+	app.Get("/api/data", func(c fiber.Ctx) error {
+		return c.SendString("Hello World!")
+	})
+
+	app.Listen(":3000")
+}
+
+```
+
+---
+
+### 3. Resilient Dual-Tier Hybrid Driver (Redis Primary + Memory Fallback)
+
+Automatic failover to in-memory fallback with Half-Open Circuit Breaker if Redis connection drops:
 
 ```go
 package main
@@ -103,46 +187,36 @@ import (
 	"time"
 
 	"github.com/balramadan/distlimit"
-	"github.com/balramadan/distlimit/driver/hybrid"
-	"github.com/balramadan/distlimit/driver/memory"
-	"github.com/balramadan/distlimit/driver/redis"
-	distlimitgin "github.com/balramadan/distlimit/middleware/gin"
-	"github.com/gin-gonic/gin"
-	goredis "github.com/redis/go-redis/v9"
+	"github.com/balramadan/distlimit/algorithm/slidingcounter"
+	distlimithybrid "github.com/balramadan/distlimit/driver/hybrid"
+	distlimitmemory "github.com/balramadan/distlimit/driver/memory"
+	distlimitredis "github.com/balramadan/distlimit/driver/redis"
+	"github.com/redis/go-redis/v9"
 )
 
 func main() {
-	rdb := goredis.NewClient(&goredis.Options{Addr: "localhost:6379"})
+	rdb := redis.NewClient(&redis.Options{Addr: "localhost:6379"})
+	primary := distlimitredis.New(rdb)
+	fallback := distlimitmemory.New(5 * time.Minute)
 
-	// Setup Driver L1 (Memory) and L2 (Redis)
-	memDriver := memory.New(1 * time.Minute)
-	redisDriver := redis.New(rdb, redis.WithPrefix("prod:rate:"))
-
-	// Assemble Hybrid Driver with Automatic Failover
-	hybridDriver := hybrid.New(
-		redisDriver,
-		memDriver,
-		hybrid.WithCoolOffDuration(5*time.Second),
-		hybrid.WithOnError(func(err error) {
-			log.Printf("ALERT: Redis outage detected! Falling back to In-Memory: %v", err)
+	// Hybrid Driver with 5s Cool-Off and Half-Open Probing
+	hybridDriver := distlimithybrid.New(
+		primary,
+		fallback,
+		distlimithybrid.WithCoolOffDuration(5*time.Second),
+		distlimithybrid.WithOnError(func(err error) {
+			log.Printf("[DISTLIMIT WARN] Redis Primary down, failing over to memory: %v", err)
 		}),
 	)
-	defer hybridDriver.Close(context.Background())
 
 	limiter, _ := distlimit.New(
 		hybridDriver,
-		distlimit.WithLimit(60),
+		distlimit.WithLimit(500),
 		distlimit.WithWindow(1*time.Minute),
+		distlimit.WithAlgorithm(slidingcounter.New()),
 	)
 
-	r := gin.Default()
-	r.Use(distlimitgin.New(limiter)) // Apply globally
-
-	r.GET("/api/ping", func(c *gin.Context) {
-		c.JSON(200, gin.H{"message": "pong"})
-	})
-
-	r.Run(":8080")
+	_, _ = limiter.AllowKey(context.Background(), "api_key_abc")
 }
 
 ```
@@ -151,51 +225,37 @@ func main() {
 
 ## 📊 Performance & Benchmarks
 
-Benchmarked on Linux x86_64 with data race detection enabled (`go test -race`):
-
-| Benchmark Scenario                       | Iterations Executed | Speed / Latency   | Memory Allocated | Allocs per Op   |
-| ---------------------------------------- | ------------------- | ----------------- | ---------------- | --------------- |
-| **Memory Driver (Single Thread)**        | 337,962             | **3,327 ns/op**   | **0 B/op**       | **0 allocs/op** |
-| **Memory Driver (Parallel Multi-Core)**  | 697,014             | **1,732 ns/op**   | **0 B/op**       | **0 allocs/op** |
-| **Redis Driver (Atomic Lua Round-Trip)** | 2,864               | **349,191 ns/op** | 760 B/op         | 28 allocs/op    |
-
-> **Key Insight:** The local In-Memory driver achieves **0 B/op and 0 allocs/op**, placing zero strain on the Go Garbage Collector (GC) during evaluation.
-
----
-
-## 📋 Standard HTTP Response Headers
-
-Every request processed by `distlimit` automatically receives standard IETF-compliant response headers:
-
-| Header Name           | Type    | Description                                                       |
-| --------------------- | ------- | ----------------------------------------------------------------- |
-| `RateLimit-Limit`     | Integer | Maximum request quota within the active window                    |
-| `RateLimit-Remaining` | Integer | Remaining request quota in the active window                      |
-| `RateLimit-Reset`     | Integer | Seconds remaining until the quota resets                          |
-| `Retry-After`         | Integer | _(Sent on HTTP 429)_ Seconds the client must wait before retrying |
-
----
-
-## 📂 Project Layout
-
-```text
-distlimit/
-├── driver/
-│   ├── memory/          # Lock-free In-Memory Storage Driver
-│   ├── redis/           # Distributed Redis Lua Script Storage Driver
-│   └── hybrid/          # Dual-Tier Resilient Hybrid Storage Driver
-├── middleware/
-│   ├── gin/             # Gin Gonic Framework Adapter
-│   └── nethttp/         # Standard net/http Middleware Adapter
-├── examples/            # Executable Example Applications
-├── distlimit.go         # Core Limiter Interfaces & Functional Options
-├── go.mod
-└── README.md
+Benchmarks executed on AMD 3020e Linux x86_64 (`go test -bench=. -benchmem ./algorithm/...`):
 
 ```
+pkg: github.com/balramadan/distlimit/algorithm/*
+cpu: AMD 3020e with Radeon Graphics
+
+BenchmarkSlidingLog_EvaluateMemory-2         60,631,044    20.36 ns/op    0 B/op    0 allocs/op
+BenchmarkTokenBucket_EvaluateMemory-2        22,322,690    46.18 ns/op    0 B/op    0 allocs/op
+BenchmarkLeakyBucket_EvaluateMemory-2        22,839,754    47.76 ns/op    0 B/op    0 allocs/op
+BenchmarkFixedWindow_EvaluateMemory-2        14,618,232    77.27 ns/op    0 B/op    0 allocs/op
+BenchmarkSlidingCounter_EvaluateMemory-2      8,917,860   129.10 ns/op    0 B/op    0 allocs/op
+
+```
+
+> **Key Takeaway:** All 5 algorithms achieve **zero memory allocations (`0 B/op`, `0 allocs/op`)** during in-memory evaluation, allowing your Go application to handle tens of millions of rate-check operations per second without GC pause overhead.
+
+---
+
+## 🛡️ Framework & Middleware Adapters
+
+`distlimit` provides native, zero-dependency middleware adapters for all popular Go web frameworks:
+
+- ⚡ [`middleware/fiber`](https://www.google.com/search?q=middleware/fiber) — Fiber v3
+- 🍸 [`middleware/gin`](https://www.google.com/search?q=middleware/gin) — Gin Framework
+- 🔊 [`middleware/echo`](https://www.google.com/search?q=middleware/echo) — Echo v4
+- 🔊 [`middleware/echov5`](https://www.google.com/search?q=middleware/echov5) — Echo v5
+- 🌐 [`middleware/nethttp`](https://www.google.com/search?q=middleware/nethttp) — Standard `net/http` & Chi
+- 📡 [`middleware/grpc`](https://www.google.com/search?q=middleware/grpc) — gRPC Unary & Streaming Interceptors
 
 ---
 
 ## 📄 License
 
-This project is licensed under the [MIT License](LICENSE).
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.

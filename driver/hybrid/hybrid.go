@@ -1,6 +1,6 @@
-// Package hybrid implements a two-tier resilience rate limiting driver.
-// It combines a primary distributed driver (e.g., Redis) with a local fallback driver
-// (e.g., In-Memory) to provide failover capabilities when the primary driver is unavailable.
+// Package hybrid implements a dual-tier resilient rate limiting driver with a Half-Open Circuit Breaker.
+// It orchestrates a primary distributed storage driver (e.g., Redis) and a local fallback storage driver
+// (e.g., In-Memory) to provide high availability during primary infrastructure outages.
 package hybrid
 
 import (
@@ -9,126 +9,122 @@ import (
 	"time"
 
 	"github.com/balramadan/distlimit"
+	"github.com/balramadan/distlimit/algorithm"
 )
 
-// Driver implements the distlimit.Driver interface, orchestrating a dual-tier rate limiting strategy.
-// It coordinates a primary driver and a fallback driver, utilizing a fail-open circuit breaker pattern.
-// If the primary driver experiences failures, the driver shifts requests to the fallback driver for
-// a configured cool-off period.
+// Driver implements the distlimit.Driver interface, coordinating a primary driver and a fallback driver.
+// It uses an atomic Half-Open Circuit Breaker pattern to prevent thundering herd problems on Redis recovery.
 //
-// Driver is safe for concurrent use by multiple goroutines.
+// Driver is thread-safe and safe for concurrent use by multiple goroutines.
 type Driver struct {
-	primary         distlimit.Driver
-	fallback        distlimit.Driver
-	onError         func(err error)
-	coolOffDuration time.Duration
-
-	isPrimaryDown int32 // 0 = Healthy, 1 = Down
-	lastFailedNs  int64 // Timestamp in nanoseconds when the primary driver last failed
-	fallbackCount int64 // Total number of times fallback execution has been triggered
+	primary       distlimit.Driver
+	fallback      distlimit.Driver
+	coolOff       time.Duration
+	onError       func(err error)
+	isDown        atomic.Bool
+	lastFailUnix  atomic.Int64
+	probingActive atomic.Bool
+	fallbackCount atomic.Uint64
 }
 
 // Option configures functional parameters for the hybrid Driver.
 type Option func(*Driver)
 
-// WithOnError registers a callback function that is invoked whenever the primary driver encounters an error.
-// This is typically used for external logging, alerting, or telemetry/metrics collection.
+// WithCoolOffDuration sets the cool-off recovery duration before attempting to probe the primary driver again.
+// The default duration is 10 seconds.
+func WithCoolOffDuration(d time.Duration) Option {
+	return func(h *Driver) {
+		h.coolOff = d
+	}
+}
+
+// WithOnError registers an error callback function invoked whenever the primary driver encounters an error.
 func WithOnError(fn func(err error)) Option {
-	return func(d *Driver) {
-		d.onError = fn
+	return func(h *Driver) {
+		h.onError = fn
 	}
 }
 
-// WithCoolOffDuration sets the duration that the Driver stays in Fallback mode
-// before attempting to reconnect/retry the primary driver.
-// The default duration is 5 seconds.
-func WithCoolOffDuration(duration time.Duration) Option {
-	return func(d *Driver) {
-		d.coolOffDuration = duration
-	}
-}
-
-// New creates and initializes a new hybrid Driver instance with a primary driver,
-// a fallback driver, and optional configurations.
-func New(primary distlimit.Driver, fallback distlimit.Driver, opts ...Option) *Driver {
-	d := &Driver{
-		primary:         primary,
-		fallback:        fallback,
-		coolOffDuration: 5 * time.Second, // Default cool-off duration of 5 seconds
+// New creates and initializes a new hybrid Driver with a primary driver, fallback driver, and optional configurations.
+func New(primary, fallback distlimit.Driver, opts ...Option) *Driver {
+	h := &Driver{
+		primary:  primary,
+		fallback: fallback,
+		coolOff:  10 * time.Second,
 	}
 
 	for _, opt := range opts {
-		opt(d)
+		opt(h)
 	}
 
-	return d
+	return h
 }
 
-// Allow evaluates the rate limit key against the configured rules.
-// It first checks if the primary driver is in a cool-off state. If so, it immediately executes
-// the fallback driver to avoid hanging on a failing database.
-// If the primary driver is healthy, it attempts to evaluate using it. Any error from the primary
-// driver triggers the fallback mechanism, registers the failure timestamp, and transitions the
-// driver state to unhealthy.
-func (d *Driver) Allow(ctx context.Context, key string, limit int64, window time.Duration) (distlimit.Result, error) {
-	nowNs := time.Now().UnixNano()
+// Allow evaluates the rate limit key against the primary driver if healthy.
+// If the primary driver is down, it uses a Half-Open Circuit Breaker to allow a single probing request
+// to test primary health after the cool-off duration, routing all other concurrent traffic to fallback.
+func (h *Driver) Allow(ctx context.Context, key string, limit int64, window time.Duration, alg algorithm.Algorithm) (algorithm.Result, error) {
+	isDown := h.isDown.Load()
 
-	// 1. Check if the primary driver is currently in the "Cool-Off" state
-	if atomic.LoadInt32(&d.isPrimaryDown) == 1 {
-		lastFail := atomic.LoadInt64(&d.lastFailedNs)
-		if nowNs-lastFail < d.coolOffDuration.Nanoseconds() {
-			// Cool-off active: Route immediately to the fallback driver (In-Memory)
-			return d.executeFallback(ctx, key, limit, window, nil)
+	if isDown {
+		lastFail := time.Unix(0, h.lastFailUnix.Load())
+
+		// Check if cool-off period has expired
+		if time.Since(lastFail) >= h.coolOff {
+			// HALF-OPEN CIRCUIT BREAKER: Atomic CAS ensures only 1 probing request attempts the primary driver
+			if h.probingActive.CompareAndSwap(false, true) {
+				res, err := h.primary.Allow(ctx, key, limit, window, alg)
+				if err == nil {
+					// Probing succeeded: Reset status to closed (healthy)
+					h.isDown.Store(false)
+					h.probingActive.Store(false)
+					return res, nil
+				}
+
+				// Probing failed: Reset cool-off timer and record error
+				h.lastFailUnix.Store(time.Now().UnixNano())
+				h.probingActive.Store(false)
+				if h.onError != nil {
+					h.onError(err)
+				}
+			}
 		}
-		// Cool-off expired: Reset health status and retry primary driver
-		atomic.StoreInt32(&d.isPrimaryDown, 0)
+
+		// Fallback execution for concurrent traffic during cool-off or failed probing
+		h.fallbackCount.Add(1)
+		return h.fallback.Allow(ctx, key, limit, window, alg)
 	}
 
-	// 2. Attempt rate limiting evaluation on the primary driver
-	res, err := d.primary.Allow(ctx, key, limit, window)
-	if err == nil {
-		return res, nil
-	}
-
-	// 3. Primary driver failed: Transition to unhealthy and record timestamps
-	atomic.StoreInt32(&d.isPrimaryDown, 1)
-	atomic.StoreInt64(&d.lastFailedNs, nowNs)
-
-	// Execute custom error handler if registered
-	if d.onError != nil {
-		d.onError(err)
-	}
-
-	// 4. Gracefully fall back to the In-Memory driver
-	return d.executeFallback(ctx, key, limit, window, err)
-}
-
-// executeFallback executes the fallback driver and increments the fallback counter.
-func (d *Driver) executeFallback(ctx context.Context, key string, limit int64, window time.Duration, primaryErr error) (distlimit.Result, error) {
-	atomic.AddInt64(&d.fallbackCount, 1)
-
-	res, err := d.fallback.Allow(ctx, key, limit, window)
+	// Normal Closed state: Evaluate using primary driver
+	res, err := h.primary.Allow(ctx, key, limit, window, alg)
 	if err != nil {
-		// Fallback driver also failed, propagate error to the caller
-		return distlimit.Result{}, err
+		// Primary failed: Transition circuit breaker to Open state
+		h.isDown.Store(true)
+		h.lastFailUnix.Store(time.Now().UnixNano())
+		h.fallbackCount.Add(1)
+
+		if h.onError != nil {
+			h.onError(err)
+		}
+
+		return h.fallback.Allow(ctx, key, limit, window, alg)
 	}
 
 	return res, nil
 }
 
-// FallbackCount returns the total number of times the fallback driver has been triggered.
-func (d *Driver) FallbackCount() int64 {
-	return atomic.LoadInt64(&d.fallbackCount)
+// IsPrimaryDown returns true if the primary driver is currently marked as down.
+func (h *Driver) IsPrimaryDown() bool {
+	return h.isDown.Load()
 }
 
-// IsPrimaryHealthy returns true if the primary driver is currently healthy and active.
-func (d *Driver) IsPrimaryHealthy() bool {
-	return atomic.LoadInt32(&d.isPrimaryDown) == 0
+// FallbackCount returns the total number of times execution was delegated to the fallback driver.
+func (h *Driver) FallbackCount() uint64 {
+	return h.fallbackCount.Load()
 }
 
-// Close gracefully terminates both the primary and fallback drivers.
-func (d *Driver) Close(ctx context.Context) error {
-	_ = d.primary.Close(ctx)
-	_ = d.fallback.Close(ctx)
-	return nil
+// Close gracefully closes both the primary and fallback storage drivers.
+func (h *Driver) Close(ctx context.Context) error {
+	_ = h.primary.Close(ctx)
+	return h.fallback.Close(ctx)
 }
