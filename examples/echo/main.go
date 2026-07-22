@@ -15,7 +15,7 @@ import (
 
 func main() {
 	memDriver := memory.New(5 * time.Minute)
-	defer memDriver.Close(context.Background())
+	defer func() { _ = memDriver.Close(context.Background()) }()
 
 	limiter, err := distlimit.New(
 		memDriver,

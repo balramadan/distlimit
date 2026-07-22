@@ -57,7 +57,7 @@ func TestHybridDriver_NormalFlow(t *testing.T) {
 func TestHybridDriver_FailoverToFallback(t *testing.T) {
 	primary := &failingDriver{}
 	fallback := memory.New(1 * time.Minute)
-	defer fallback.Close(context.Background())
+	defer func() { _ = fallback.Close(context.Background()) }()
 
 	var errorLogged bool
 	hDriver := hybrid.New(
@@ -94,7 +94,7 @@ func TestHybridDriver_FailoverToFallback(t *testing.T) {
 func TestHybridDriver_CoolOffRecovery(t *testing.T) {
 	primary := &failingDriver{}
 	fallback := memory.New(1 * time.Minute)
-	defer fallback.Close(context.Background())
+	defer func() { _ = fallback.Close(context.Background()) }()
 
 	coolOff := 50 * time.Millisecond
 	hDriver := hybrid.New(primary, fallback, hybrid.WithCoolOffDuration(coolOff))

@@ -15,7 +15,7 @@ import (
 
 func main() {
 	memDriver := memory.New(5 * time.Minute)
-	defer memDriver.Close(context.Background())
+	defer func() { _ = memDriver.Close(context.Background()) }()
 
 	limiter, err := distlimit.New(
 		memDriver,
@@ -30,7 +30,7 @@ func main() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/ping", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprintln(w, `{"status":"success","message":"pong from net/http!"}`)
+		_, _ = fmt.Fprintln(w, `{"status":"success","message":"pong from net/http!"}`)
 	})
 
 	// Wrap handler dengan distlimit middleware

@@ -34,7 +34,7 @@ func (m *mockAlgorithm) RedisScript() string { return "" }
 
 func TestMemoryDriver_Allow(t *testing.T) {
 	d := memory.New(1 * time.Minute)
-	defer d.Close(context.Background())
+	defer func() { _ = d.Close(context.Background()) }()
 
 	alg := &mockAlgorithm{}
 	ctx := context.Background()
@@ -60,7 +60,7 @@ func TestMemoryDriver_Allow(t *testing.T) {
 
 func TestMemoryDriver_ConcurrentAccess(t *testing.T) {
 	d := memory.New(1 * time.Minute)
-	defer d.Close(context.Background())
+	defer func() { _ = d.Close(context.Background()) }()
 
 	alg := &mockAlgorithm{}
 	ctx := context.Background()
