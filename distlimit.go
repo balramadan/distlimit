@@ -1,96 +1,155 @@
+// Package distlimit provides a high-performance, resilient, and pluggable rate limiting library for Go applications.
+// It supports pluggable algorithm strategies (Token Bucket, Leaky Bucket, Sliding Window Counter, Sliding Window Log, Fixed Window),
+// multiple storage drivers (In-Memory, Redis, Hybrid Dual-Tier), and turn-key middleware adapters for popular frameworks.
 package distlimit
 
 import (
 	"context"
 	"errors"
 	"time"
+
+	"github.com/balramadan/distlimit/algorithm"
+	"github.com/balramadan/distlimit/algorithm/slidingcounter"
 )
 
-var ErrInvalidLimit = errors.New("Distlimit: The limit must be greater than 0")
+// Result is a type alias for algorithm.Result for backward compatibility with v1.0.0.
+type Result = algorithm.Result
 
-var ErrInvalidWindow = errors.New("Distlimit: The window must be greater than 0")
+// State is a type alias for algorithm.State for backward compatibility with v1.0.0.
+type State = algorithm.State
 
-var ErrNilDriver = errors.New("Distlimit: The driver must not be nil")
+// Sentinels errors returned by distlimit.
+var (
+	// ErrInvalidLimit is returned when the configured rate limit is less than or equal to 0.
+	ErrInvalidLimit = errors.New("distlimit: limit must be greater than 0")
 
-type Result struct {
-	Allowed   bool
-	Limit     int64
-	Remaining int64
-	ResetIn   time.Duration
-}
+	// ErrInvalidWindow is returned when the configured rate limit window is less than or equal to 0.
+	ErrInvalidWindow = errors.New("distlimit: window must be greater than 0")
 
+	// ErrNilDriver is returned when a nil Driver is supplied during Limiter initialization.
+	ErrNilDriver = errors.New("distlimit: storage driver cannot be nil")
+
+	// ErrNilAlgorithm is returned when a nil Algorithm is supplied to WithAlgorithm.
+	ErrNilAlgorithm = errors.New("distlimit: algorithm strategy cannot be nil")
+)
+
+// KeyFunc defines a function signature for dynamically extracting a rate limit key from a Context.
+type KeyFunc func(ctx context.Context) string
+
+// Driver defines the interface that all rate limiting storage backends (Memory, Redis, Hybrid) must implement.
 type Driver interface {
-	Allow(ctx context.Context, key string, limit int64, window time.Duration) (Result, error)
+	// Allow evaluates rate limit rules for the specified key using the given algorithm strategy.
+	Allow(ctx context.Context, key string, limit int64, window time.Duration, alg algorithm.Algorithm) (algorithm.Result, error)
 
+	// Close gracefully releases any storage connections, background routines, or resources held by the driver.
 	Close(ctx context.Context) error
 }
 
-type KeyFunc func(ctx context.Context) string
-
-type Limiter struct {
-	driver  Driver
-	limit   int64
-	window  time.Duration
-	keyFunc KeyFunc
+// Config holds configuration parameters used during Limiter construction.
+type Config struct {
+	limit     int64
+	window    time.Duration
+	algorithm algorithm.Algorithm
+	keyFunc   KeyFunc
 }
 
-type Option func(*Limiter)
+// Option configures functional parameters for Limiter initialization.
+type Option func(*Config)
 
+// WithLimit sets the maximum number of requests allowed within the configured time window.
 func WithLimit(limit int64) Option {
-	return func(l *Limiter) {
-		l.limit = limit
+	return func(c *Config) {
+		c.limit = limit
 	}
 }
 
+// WithWindow sets the duration of the rate limiting time window.
 func WithWindow(window time.Duration) Option {
-	return func(l *Limiter) {
-		l.window = window
+	return func(c *Config) {
+		c.window = window
 	}
 }
 
+// WithAlgorithm sets the pluggable rate limiting algorithm strategy (e.g., tokenbucket, leakybucket, slidingcounter).
+func WithAlgorithm(alg algorithm.Algorithm) Option {
+	return func(c *Config) {
+		c.algorithm = alg
+	}
+}
+
+// WithKeyFunc configures a custom key extraction function for extracting rate limit keys from context.
 func WithKeyFunc(fn KeyFunc) Option {
-	return func(l *Limiter) {
-		l.keyFunc = fn
+	return func(c *Config) {
+		c.keyFunc = fn
 	}
 }
 
+// Limiter is the central rate limiting coordinator. It combines a storage Driver, rate rules,
+// and an algorithm strategy to evaluate incoming requests.
+//
+// Limiter is thread-safe and designed for concurrent use by multiple goroutines.
+type Limiter struct {
+	driver    Driver
+	limit     int64
+	window    time.Duration
+	algorithm algorithm.Algorithm
+	keyFunc   KeyFunc
+}
+
+// New creates and initializes a new Limiter instance with the specified storage driver and optional options.
+// If WithAlgorithm is omitted, it defaults to the Sliding Window Counter algorithm strategy for backward compatibility.
+// Returns an error if driver is nil, or if limit or window are invalid (<= 0).
 func New(driver Driver, opts ...Option) (*Limiter, error) {
 	if driver == nil {
 		return nil, ErrNilDriver
 	}
 
-	limiter := &Limiter{
-		driver: driver,
-		limit:  100,
-		window: 1 * time.Minute,
+	cfg := &Config{
+		limit:  100,             // Default limit: 100 requests
+		window: 1 * time.Minute, // Default window: 1 minute
 		keyFunc: func(ctx context.Context) string {
 			return "global"
 		},
 	}
 
 	for _, opt := range opts {
-		opt(limiter)
+		opt(cfg)
 	}
 
-	if limiter.limit <= 0 {
+	// Validation
+	if cfg.limit <= 0 {
 		return nil, ErrInvalidLimit
 	}
-	if limiter.window <= 0 {
+	if cfg.window <= 0 {
 		return nil, ErrInvalidWindow
 	}
 
-	return limiter, nil
+	// Fallback to Sliding Counter if no algorithm was explicitly provided
+	if cfg.algorithm == nil {
+		cfg.algorithm = slidingcounter.New()
+	}
+
+	return &Limiter{
+		driver:    driver,
+		limit:     cfg.limit,
+		window:    cfg.window,
+		algorithm: cfg.algorithm,
+		keyFunc:   cfg.keyFunc,
+	}, nil
 }
 
+// Allow evaluates the rate limit key extracted via the configured KeyFunc against the active limits.
 func (l *Limiter) Allow(ctx context.Context) (Result, error) {
 	key := l.keyFunc(ctx)
-	return l.driver.Allow(ctx, key, l.limit, l.window)
+	return l.driver.Allow(ctx, key, l.limit, l.window, l.algorithm)
 }
 
+// AllowKey evaluates the rate limit for an explicitly specified key string against the active limits.
 func (l *Limiter) AllowKey(ctx context.Context, key string) (Result, error) {
-	return l.driver.Allow(ctx, key, l.limit, l.window)
+	return l.driver.Allow(ctx, key, l.limit, l.window, l.algorithm)
 }
 
+// Close gracefully closes the underlying storage driver and releases associated resources.
 func (l *Limiter) Close(ctx context.Context) error {
 	return l.driver.Close(ctx)
 }

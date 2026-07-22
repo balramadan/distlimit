@@ -7,72 +7,59 @@ import (
 	"time"
 
 	"github.com/balramadan/distlimit"
-	"github.com/balramadan/distlimit/driver/hybrid"
-	"github.com/balramadan/distlimit/driver/memory"
-	"github.com/balramadan/distlimit/driver/redis"
+	"github.com/balramadan/distlimit/algorithm/tokenbucket"
+	distlimithybrid "github.com/balramadan/distlimit/driver/hybrid"
+	distlimitmemory "github.com/balramadan/distlimit/driver/memory"
+	distlimitredis "github.com/balramadan/distlimit/driver/redis"
 	distlimitgin "github.com/balramadan/distlimit/middleware/gin"
 	"github.com/gin-gonic/gin"
-	goredis "github.com/redis/go-redis/v9"
+	"github.com/redis/go-redis/v9"
 )
 
 func main() {
-	// 1. Setup Redis Client (L2 Primary Storage)
-	rdb := goredis.NewClient(&goredis.Options{
-		Addr:     "localhost:6379",
-		Password: "", // Default no password
-		DB:       0,
+	// 1. Primary Driver: Redis
+	rdb := redis.NewClient(&redis.Options{
+		Addr: "localhost:6379",
 	})
+	redisDriver := distlimitredis.New(rdb)
 
-	// PING Redis untuk mengecek koneksi awal
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	if err := rdb.Ping(ctx).Err(); err != nil {
-		log.Println("⚠️  Warning: Redis ping gagal. Hybrid Driver akan otomatis menggunakan In-Memory Fallback!")
-	} else {
-		log.Println("✅ Terhubung ke Redis Server (Primary Driver Ready).")
-	}
+	// 2. Fallback Driver: Memory (64-Sharded)
+	memDriver := distlimitmemory.New(5 * time.Minute)
+	defer func() { _ = memDriver.Close(context.Background()) }()
 
-	// 2. Inisialisasi Driver L1 (Memory) dan L2 (Redis)
-	memDriver := memory.New(1 * time.Minute)
-	defer memDriver.Close(context.Background())
-
-	redisDriver := redis.New(rdb, redis.WithPrefix("demo:distlimit:"))
-
-	// 3. Rakit Hybrid Driver (The Killer Feature)
-	hybridDriver := hybrid.New(
+	// 3. Dual-Tier Hybrid Driver dengan Half-Open Circuit Breaker
+	hybridDriver := distlimithybrid.New(
 		redisDriver,
 		memDriver,
-		hybrid.WithCoolOffDuration(5*time.Second), // Cool-off 5 detik jika Redis down
-		hybrid.WithOnError(func(err error) {
-			log.Printf("🚨 [DISTLIMIT ALERT] Terjadi gangguan pada Redis: %v! Otomatis beralih ke In-Memory Fallback.", err)
+		distlimithybrid.WithCoolOffDuration(5*time.Second),
+		distlimithybrid.WithOnError(func(err error) {
+			log.Printf("[DISTLIMIT WARN] Redis Primary down/error: %v. Switching to Memory Fallback.", err)
 		}),
 	)
-	defer hybridDriver.Close(context.Background())
 
-	// 4. Inisialisasi Core Limiter (Aturan: Maksimal 5 Request per 10 Detik)
+	// 4. Inisialisasi Limiter dengan Hybrid Driver & Token Bucket Algorithm
 	limiter, err := distlimit.New(
 		hybridDriver,
-		distlimit.WithLimit(5),
-		distlimit.WithWindow(10*time.Second),
+		distlimit.WithLimit(10),
+		distlimit.WithWindow(1*time.Minute),
+		distlimit.WithAlgorithm(tokenbucket.New()),
 	)
 	if err != nil {
-		log.Fatalf("Gagal membuat limiter: %v", err)
+		log.Fatalf("Failed to initialize limiter: %v", err)
 	}
 
-	// 5. Inisialisasi Gin Engine & Pasang Distlimit Middleware
 	r := gin.Default()
+
+	// Pasang Middleware Gin
 	r.Use(distlimitgin.New(limiter))
 
-	// 6. Endpoint Contoh
-	r.GET("/api/v1/ping", func(c *gin.Context) {
+	r.GET("/api/ping", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{
-			"message":        "pong",
-			"redis_healthy":  hybridDriver.IsPrimaryHealthy(),
-			"fallback_count": hybridDriver.FallbackCount(),
+			"status":  "success",
+			"message": "pong from Gin with Hybrid Driver!",
 		})
 	})
 
-	log.Println("🚀 Server demo berjalan di http://localhost:8080")
-	log.Println("💡 Batas Rate Limit: 5 Request / 10 Detik")
-	_ = r.Run(":8080")
+	log.Println("⚡ Gin + Hybrid Driver server running on http://localhost:8080")
+	log.Fatal(r.Run(":8080"))
 }
