@@ -38,7 +38,7 @@ func (w *workingDriver) Close(ctx context.Context) error { return nil }
 func TestHybridDriver_NormalFlow(t *testing.T) {
 	primary := &workingDriver{}
 	fallback := memory.New(1 * time.Minute)
-	defer fallback.Close(context.Background())
+	defer func() { _ = fallback.Close(context.Background()) }()
 
 	hDriver := hybrid.New(primary, fallback)
 	alg := &mockAlgorithm{}

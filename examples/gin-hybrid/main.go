@@ -25,7 +25,7 @@ func main() {
 
 	// 2. Fallback Driver: Memory (64-Sharded)
 	memDriver := distlimitmemory.New(5 * time.Minute)
-	defer memDriver.Close(context.Background())
+	defer func() { _ = memDriver.Close(context.Background()) }()
 
 	// 3. Dual-Tier Hybrid Driver dengan Half-Open Circuit Breaker
 	hybridDriver := distlimithybrid.New(

@@ -15,7 +15,7 @@ import (
 func main() {
 	// 1. Driver
 	memDriver := memory.New(5 * time.Minute)
-	defer memDriver.Close(context.Background())
+	defer func() { _ = memDriver.Close(context.Background()) }()
 
 	// 2. Limiter dengan Sliding Counter Algorithm (5 req / 10s)
 	limiter, err := distlimit.New(
