@@ -5,6 +5,7 @@ package nethttp
 import (
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/balramadan/distlimit"
@@ -101,12 +102,22 @@ func New(limiter *distlimit.Limiter, opts ...Option) func(http.Handler) http.Han
 				return
 			}
 
-			// Set Rate Limit Headers
-			w.Header().Set("X-RateLimit-Limit", strings.TrimSpace(http.StatusText(int(res.Limit))))
-			w.Header().Set("X-RateLimit-Remaining", strings.TrimSpace(http.StatusText(int(res.Remaining))))
+			// Set Rate Limit Headers (IETF RFC 6585 & Legacy Headers)
+			resetSec := int64(res.ResetIn.Seconds())
+			if resetSec < 1 && res.ResetIn > 0 {
+				resetSec = 1
+			}
+
+			w.Header().Set("RateLimit-Limit", strconv.FormatInt(res.Limit, 10))
+			w.Header().Set("RateLimit-Remaining", strconv.FormatInt(res.Remaining, 10))
+			w.Header().Set("RateLimit-Reset", strconv.FormatInt(resetSec, 10))
+
+			w.Header().Set("X-RateLimit-Limit", strconv.FormatInt(res.Limit, 10))
+			w.Header().Set("X-RateLimit-Remaining", strconv.FormatInt(res.Remaining, 10))
+			w.Header().Set("X-RateLimit-Reset", strconv.FormatInt(resetSec, 10))
 
 			if !res.Allowed {
-				w.Header().Set("Retry-After", strings.TrimSpace(http.StatusText(int(res.ResetIn.Seconds()))))
+				w.Header().Set("Retry-After", strconv.FormatInt(resetSec, 10))
 				w.WriteHeader(http.StatusTooManyRequests)
 				_, _ = w.Write([]byte(`{"error":"Too Many Requests"}`))
 				return

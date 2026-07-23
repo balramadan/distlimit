@@ -41,6 +41,9 @@ type Driver interface {
 	// Allow evaluates rate limit rules for the specified key using the given algorithm strategy.
 	Allow(ctx context.Context, key string, limit int64, window time.Duration, alg algorithm.Algorithm) (algorithm.Result, error)
 
+	// Reset clears the rate limit state entry for the specified key in the storage driver.
+	Reset(ctx context.Context, key string) error
+
 	// Close gracefully releases any storage connections, background routines, or resources held by the driver.
 	Close(ctx context.Context) error
 }
@@ -80,7 +83,9 @@ func WithAlgorithm(alg algorithm.Algorithm) Option {
 // WithKeyFunc configures a custom key extraction function for extracting rate limit keys from context.
 func WithKeyFunc(fn KeyFunc) Option {
 	return func(c *Config) {
-		c.keyFunc = fn
+		if fn != nil {
+			c.keyFunc = fn
+		}
 	}
 }
 
@@ -141,12 +146,26 @@ func New(driver Driver, opts ...Option) (*Limiter, error) {
 // Allow evaluates the rate limit key extracted via the configured KeyFunc against the active limits.
 func (l *Limiter) Allow(ctx context.Context) (Result, error) {
 	key := l.keyFunc(ctx)
+	if key == "" {
+		key = "global"
+	}
 	return l.driver.Allow(ctx, key, l.limit, l.window, l.algorithm)
 }
 
 // AllowKey evaluates the rate limit for an explicitly specified key string against the active limits.
 func (l *Limiter) AllowKey(ctx context.Context, key string) (Result, error) {
+	if key == "" {
+		key = "global"
+	}
 	return l.driver.Allow(ctx, key, l.limit, l.window, l.algorithm)
+}
+
+// ResetKey clears the rate limit state for the specified key in the underlying storage driver.
+func (l *Limiter) ResetKey(ctx context.Context, key string) error {
+	if key == "" {
+		key = "global"
+	}
+	return l.driver.Reset(ctx, key)
 }
 
 // Close gracefully closes the underlying storage driver and releases associated resources.

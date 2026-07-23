@@ -98,14 +98,14 @@ func (h *Driver) Allow(ctx context.Context, key string, limit int64, window time
 	// Normal Closed state: Evaluate using primary driver
 	res, err := h.primary.Allow(ctx, key, limit, window, alg)
 	if err != nil {
-		// Primary failed: Transition circuit breaker to Open state
-		h.isDown.Store(true)
-		h.lastFailUnix.Store(time.Now().UnixNano())
-		h.fallbackCount.Add(1)
-
-		if h.onError != nil {
-			h.onError(err)
+		// Primary failed: Transition circuit breaker to Open state atomically
+		if h.isDown.CompareAndSwap(false, true) {
+			h.lastFailUnix.Store(time.Now().UnixNano())
+			if h.onError != nil {
+				h.onError(err)
+			}
 		}
+		h.fallbackCount.Add(1)
 
 		return h.fallback.Allow(ctx, key, limit, window, alg)
 	}
@@ -121,6 +121,15 @@ func (h *Driver) IsPrimaryDown() bool {
 // FallbackCount returns the total number of times execution was delegated to the fallback driver.
 func (h *Driver) FallbackCount() uint64 {
 	return h.fallbackCount.Load()
+}
+
+// Reset clears the rate limit state entry for the specified key from both fallback and primary drivers.
+func (h *Driver) Reset(ctx context.Context, key string) error {
+	_ = h.fallback.Reset(ctx, key)
+	if !h.isDown.Load() {
+		return h.primary.Reset(ctx, key)
+	}
+	return nil
 }
 
 // Close gracefully closes both the primary and fallback storage drivers.

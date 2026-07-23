@@ -25,7 +25,8 @@ type failingDriver struct{}
 func (f *failingDriver) Allow(ctx context.Context, key string, limit int64, window time.Duration, alg algorithm.Algorithm) (algorithm.Result, error) {
 	return algorithm.Result{}, errors.New("redis connection refused")
 }
-func (f *failingDriver) Close(ctx context.Context) error { return nil }
+func (f *failingDriver) Reset(ctx context.Context, key string) error { return nil }
+func (f *failingDriver) Close(ctx context.Context) error           { return nil }
 
 // workingDriver mensimulasikan primary driver yang berjalan normal
 type workingDriver struct{}
@@ -33,7 +34,8 @@ type workingDriver struct{}
 func (w *workingDriver) Allow(ctx context.Context, key string, limit int64, window time.Duration, alg algorithm.Algorithm) (algorithm.Result, error) {
 	return algorithm.Result{Allowed: true, Limit: limit, Remaining: limit - 1, ResetIn: window}, nil
 }
-func (w *workingDriver) Close(ctx context.Context) error { return nil }
+func (w *workingDriver) Reset(ctx context.Context, key string) error { return nil }
+func (w *workingDriver) Close(ctx context.Context) error           { return nil }
 
 func TestHybridDriver_NormalFlow(t *testing.T) {
 	primary := &workingDriver{}
