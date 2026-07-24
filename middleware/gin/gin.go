@@ -101,11 +101,21 @@ func New(limiter *distlimit.Limiter, opts ...Option) gin.HandlerFunc {
 			return
 		}
 
+		resetSec := int64(res.ResetIn.Seconds())
+		if resetSec < 1 && res.ResetIn > 0 {
+			resetSec = 1
+		}
+
+		c.Header("RateLimit-Limit", strconv.FormatInt(res.Limit, 10))
+		c.Header("RateLimit-Remaining", strconv.FormatInt(res.Remaining, 10))
+		c.Header("RateLimit-Reset", strconv.FormatInt(resetSec, 10))
+
 		c.Header("X-RateLimit-Limit", strconv.FormatInt(res.Limit, 10))
 		c.Header("X-RateLimit-Remaining", strconv.FormatInt(res.Remaining, 10))
+		c.Header("X-RateLimit-Reset", strconv.FormatInt(resetSec, 10))
 
 		if !res.Allowed {
-			c.Header("Retry-After", strconv.FormatInt(int64(res.ResetIn.Seconds()), 10))
+			c.Header("Retry-After", strconv.FormatInt(resetSec, 10))
 			c.AbortWithStatusJSON(http.StatusTooManyRequests, gin.H{"error": "Too Many Requests"})
 			return
 		}

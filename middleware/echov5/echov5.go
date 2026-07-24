@@ -101,11 +101,21 @@ func New(limiter *distlimit.Limiter, opts ...Option) echo.MiddlewareFunc {
 				return next(c)
 			}
 
+			resetSec := int64(res.ResetIn.Seconds())
+			if resetSec < 1 && res.ResetIn > 0 {
+				resetSec = 1
+			}
+
+			c.Response().Header().Set("RateLimit-Limit", strconv.FormatInt(res.Limit, 10))
+			c.Response().Header().Set("RateLimit-Remaining", strconv.FormatInt(res.Remaining, 10))
+			c.Response().Header().Set("RateLimit-Reset", strconv.FormatInt(resetSec, 10))
+
 			c.Response().Header().Set("X-RateLimit-Limit", strconv.FormatInt(res.Limit, 10))
 			c.Response().Header().Set("X-RateLimit-Remaining", strconv.FormatInt(res.Remaining, 10))
+			c.Response().Header().Set("X-RateLimit-Reset", strconv.FormatInt(resetSec, 10))
 
 			if !res.Allowed {
-				c.Response().Header().Set("Retry-After", strconv.FormatInt(int64(res.ResetIn.Seconds()), 10))
+				c.Response().Header().Set("Retry-After", strconv.FormatInt(resetSec, 10))
 				return c.JSON(http.StatusTooManyRequests, map[string]string{"error": "Too Many Requests"})
 			}
 

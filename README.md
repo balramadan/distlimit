@@ -1,14 +1,13 @@
 # ⚡ distlimit
 
 [![Go Reference](https://pkg.go.dev/badge/github.com/balramadan/distlimit.svg)](https://pkg.go.dev/github.com/balramadan/distlimit)
-[![Go Report Card](https://goreportcard.com/badge/github.com/balramadan/distlimit)](https://goreportcard.com/report/github.com/balramadan/distlimit)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 **`distlimit`** is an ultra-high performance, distributed, pluggable rate-limiting library for Go. Engineered for microservices, high-concurrency APIs, and financial-grade applications requiring nanosecond-level execution speeds, zero memory allocation, and multi-tier failover capabilities.
 
 ---
 
-## 🚀 Why `distlimit`? (Competitive Edge)
+## 🚀 Why `distlimit`?
 
 Most Go rate-limiting libraries force you into a single algorithm, lock global mutexes during background cleanup, or collapse when Redis goes down. **`distlimit`** solves these architectural flaws with enterprise-grade resilience:
 

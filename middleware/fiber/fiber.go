@@ -97,11 +97,21 @@ func New(limiter *distlimit.Limiter, opts ...Option) fiber.Handler {
 			return c.Next()
 		}
 
+		resetSec := int64(res.ResetIn.Seconds())
+		if resetSec < 1 && res.ResetIn > 0 {
+			resetSec = 1
+		}
+
+		c.Set("RateLimit-Limit", strconv.FormatInt(res.Limit, 10))
+		c.Set("RateLimit-Remaining", strconv.FormatInt(res.Remaining, 10))
+		c.Set("RateLimit-Reset", strconv.FormatInt(resetSec, 10))
+
 		c.Set("X-RateLimit-Limit", strconv.FormatInt(res.Limit, 10))
 		c.Set("X-RateLimit-Remaining", strconv.FormatInt(res.Remaining, 10))
+		c.Set("X-RateLimit-Reset", strconv.FormatInt(resetSec, 10))
 
 		if !res.Allowed {
-			c.Set("Retry-After", strconv.FormatInt(int64(res.ResetIn.Seconds()), 10))
+			c.Set("Retry-After", strconv.FormatInt(resetSec, 10))
 			return c.Status(http.StatusTooManyRequests).JSON(fiber.Map{
 				"error": "Too Many Requests",
 			})

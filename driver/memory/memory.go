@@ -125,6 +125,15 @@ func (d *Driver) cleanup() {
 	}
 }
 
+// Reset clears the rate limit state entry for the specified key from its memory shard.
+func (d *Driver) Reset(ctx context.Context, key string) error {
+	shard := d.getShard(key)
+	shard.mu.Lock()
+	delete(shard.store, key)
+	shard.mu.Unlock()
+	return nil
+}
+
 // Close gracefully stops the background cleanup worker and releases associated resources.
 func (d *Driver) Close(ctx context.Context) error {
 	d.closeOnce.Do(func() {

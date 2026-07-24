@@ -103,6 +103,13 @@ func toInt64(val interface{}) (int64, bool) {
 	}
 }
 
+// Reset deletes the rate limit key (and its sequence key if applicable) from Redis.
+func (d *Driver) Reset(ctx context.Context, key string) error {
+	redisKey := fmt.Sprintf("%s:{%s}", d.prefix, key)
+	seqKey := fmt.Sprintf("%s:seq", redisKey)
+	return d.client.Del(ctx, redisKey, seqKey).Err()
+}
+
 // Close closes the underlying Redis client connection pool.
 func (d *Driver) Close(ctx context.Context) error {
 	return d.client.Close()
