@@ -6,7 +6,6 @@ import (
 	"time"
 
 	"github.com/balramadan/distlimit"
-	"github.com/balramadan/distlimit/algorithm"
 	"github.com/balramadan/distlimit/driver/memory"
 )
 
@@ -87,11 +86,3 @@ func TestLimiter_ResetKey(t *testing.T) {
 		t.Fatalf("expected request after ResetKey to be allowed, got err=%v, allowed=%v", err, res.Allowed)
 	}
 }
-
-type dummyAlgorithm struct{}
-
-func (d *dummyAlgorithm) Name() string { return "dummy" }
-func (d *dummyAlgorithm) EvaluateMemory(now time.Time, state *algorithm.State, limit int64, window time.Duration) algorithm.Result {
-	return algorithm.Result{Allowed: true, Limit: limit, Remaining: limit - 1, ResetIn: window}
-}
-func (d *dummyAlgorithm) RedisScript() string { return "" }
