@@ -9,12 +9,14 @@ import (
 	"strings"
 
 	"github.com/balramadan/distlimit"
+	"github.com/balramadan/distlimit/metrics"
 )
 
 // Config holds configuration parameters for the net/http rate limit middleware.
 type Config struct {
-	trustedProxies []string
-	keyFunc        distlimit.KeyFunc
+	trustedProxies     []string
+	keyFunc            distlimit.KeyFunc
+	enableRouteLabeling bool
 }
 
 // Option configures functional parameters for the net/http rate limit middleware.
@@ -31,6 +33,13 @@ func WithTrustedProxies(proxies []string) Option {
 func WithKeyFunc(fn distlimit.KeyFunc) Option {
 	return func(c *Config) {
 		c.keyFunc = fn
+	}
+}
+
+// WithRouteLabeling enables passing the HTTP request URL path/pattern as the route label in telemetry events.
+func WithRouteLabeling(enable bool) Option {
+	return func(c *Config) {
+		c.enableRouteLabeling = enable
 	}
 }
 
@@ -88,14 +97,23 @@ func New(limiter *distlimit.Limiter, opts ...Option) func(http.Handler) http.Han
 
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			ctx := r.Context()
+			if cfg.enableRouteLabeling {
+				pattern := r.URL.Path
+				if r.Pattern != "" {
+					pattern = r.Pattern
+				}
+				ctx = metrics.ContextWithRoute(ctx, pattern)
+			}
+
 			var key string
 			if cfg.keyFunc != nil {
-				key = cfg.keyFunc(r.Context())
+				key = cfg.keyFunc(ctx)
 			} else {
 				key = ExtractClientIP(r, cfg.trustedProxies)
 			}
 
-			res, err := limiter.AllowKey(r.Context(), key)
+			res, err := limiter.AllowKey(ctx, key)
 			if err != nil {
 				// Fail-Open Strategy
 				next.ServeHTTP(w, r)

@@ -60,6 +60,11 @@ func New(ttl time.Duration) *Driver {
 	return d
 }
 
+// Name returns the unique identifier string of the memory storage driver.
+func (d *Driver) Name() string {
+	return "memory"
+}
+
 // getShard determines which memory shard manages the given key using FNV-1a hashing.
 func (d *Driver) getShard(key string) *memoryShard {
 	h := fnv.New32a()

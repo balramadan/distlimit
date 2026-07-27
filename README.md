@@ -2,8 +2,9 @@
 
 [![Go Reference](https://pkg.go.dev/badge/github.com/balramadan/distlimit.svg)](https://pkg.go.dev/github.com/balramadan/distlimit)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Release](https://img.shields.io/badge/Release-v1.2.0-blue.svg)](https://github.com/balramadan/distlimit/releases/tag/v1.2.0)
 
-**`distlimit`** is an ultra-high performance, distributed, pluggable rate-limiting library for Go. Engineered for microservices, high-concurrency APIs, and financial-grade applications requiring nanosecond-level execution speeds, zero memory allocation, and multi-tier failover capabilities.
+**`distlimit`** is an ultra-high performance, distributed, pluggable rate-limiting library for Go. Engineered for microservices, high-concurrency APIs, and financial-grade applications requiring nanosecond-level execution speeds, zero memory allocation, and multi-tier failover capabilities — now with real-time observability and zero-downtime dynamic policy reloading.
 
 ---
 
@@ -17,6 +18,8 @@ Most Go rate-limiting libraries force you into a single algorithm, lock global m
 - **🛡️ Half-Open Circuit Breaker (Hybrid Driver):** Automatic failover from Redis to In-Memory with single-request probing to prevent _Thundering Herd_ spikes upon Redis recovery.
 - **🔐 Security-First Middlewares:** Built-in protection against **IP Spoofing** via CIDR-validated `WithTrustedProxies` headers inspection.
 - **🌐 Native Redis Cluster Safety:** Enforces **Redis Hash Tags `{}`** to prevent `CROSSSLOT` cluster routing errors.
+- **📊 Pluggable Observability (v1.2.0):** Zero-allocation telemetry via `metrics.Observer` with turnkey Prometheus & OpenTelemetry collectors.
+- **🔄 Dynamic Policy Engine (v1.2.0):** Lock-free $O(1)$ runtime policy updates with `atomic.Pointer[Policy]` and multi-tenant tier resolution.
 
 ---
 
@@ -70,14 +73,15 @@ Most Go rate-limiting libraries force you into a single algorithm, lock global m
 
 ```bash
 go get github.com/balramadan/distlimit
-
 ```
 
 ---
 
 ## ⚡ Quickstart
 
-### 1. Basic In-Memory Limiter with Sliding Window Counter
+### 1. Basic In-Memory Limiter
+
+Evaluate rate limits using the 64-sharded in-memory driver with Sliding Window Counter:
 
 ```go
 package main
@@ -120,60 +124,77 @@ func main() {
 		fmt.Printf("Blocked! Retry after: %v\n", res.ResetIn)
 	}
 }
-
 ```
 
 ---
 
-### 2. Secure Web Framework Middleware (Fiber / Gin / Echo / net/http)
+### 2. HTTP Middleware with Anti-Spoofing & Observability
 
-Protect your HTTP endpoints with built-in Anti-IP Spoofing protection using `WithTrustedProxies`:
+Protect HTTP endpoints with trusted proxy validation, Prometheus metrics, and per-route labels — all in one setup:
 
 ```go
 package main
 
 import (
-	"context"
+	"net/http"
 	"time"
 
 	"github.com/balramadan/distlimit"
 	"github.com/balramadan/distlimit/algorithm/tokenbucket"
 	"github.com/balramadan/distlimit/driver/memory"
-	distlimitfiber "github.com/balramadan/distlimit/middleware/fiber"
-	"github.com/gofiber/fiber/v3"
+	distprom "github.com/balramadan/distlimit/metrics/prometheus"
+	distlimitnethttp "github.com/balramadan/distlimit/middleware/nethttp"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 func main() {
 	memDriver := memory.New(5 * time.Minute)
-	defer memDriver.Close(context.Background())
+	defer memDriver.Close(nil)
+
+	// Attach Prometheus Observer
+	promObserver := distprom.NewObserver(
+		distprom.WithNamespace("my_app"),
+		distprom.WithSubsystem("api"),
+	)
 
 	limiter, _ := distlimit.New(
 		memDriver,
 		distlimit.WithLimit(100),
 		distlimit.WithWindow(1*time.Minute),
 		distlimit.WithAlgorithm(tokenbucket.New()),
+		distlimit.WithMetricObserver(promObserver),
 	)
 
-	app := fiber.New()
+	mux := http.NewServeMux()
 
-	// Enable Middleware with Strict Trusted Proxies (Cloudflare / Nginx Subnet)
-	app.Use(distlimitfiber.New(
-		limiter,
-		distlimitfiber.WithTrustedProxies([]string{"10.0.0.0/8", "172.16.0.0/12"}),
-	))
-
-	app.Get("/api/data", func(c fiber.Ctx) error {
-		return c.SendString("Hello World!")
+	// Rate-limited handler with route labeling & trusted proxy protection
+	apiHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"status":"ok"}`))
 	})
+	mux.Handle("/api/v1/resource", distlimitnethttp.New(
+		limiter,
+		distlimitnethttp.WithTrustedProxies([]string{"10.0.0.0/8", "172.16.0.0/12"}),
+		distlimitnethttp.WithRouteLabeling(true), // passes "/api/v1/resource" into metric labels
+	)(apiHandler))
 
-	app.Listen(":3000")
+	// Expose Prometheus scrape endpoint
+	mux.Handle("/metrics", promhttp.Handler())
+
+	http.ListenAndServe(":8080", mux)
 }
-
 ```
+
+**Exported Prometheus metrics:**
+
+| Metric                                  | Type      | Description                                                    |
+| --------------------------------------- | --------- | -------------------------------------------------------------- |
+| `distlimit_requests_total`              | Counter   | Total evaluations by `allowed`, `driver`, `algorithm`, `route` |
+| `distlimit_evaluation_duration_seconds` | Histogram | Execution latency of each evaluation                           |
+| `distlimit_hybrid_fallback_total`       | Counter   | Times the Hybrid Driver failed over to memory                  |
 
 ---
 
-### 3. Resilient Dual-Tier Hybrid Driver (Redis Primary + Memory Fallback)
+### 3. Resilient Dual-Tier Hybrid Driver (Redis + Memory Fallback)
 
 Automatic failover to in-memory fallback with Half-Open Circuit Breaker if Redis connection drops:
 
@@ -204,7 +225,7 @@ func main() {
 		fallback,
 		distlimithybrid.WithCoolOffDuration(5*time.Second),
 		distlimithybrid.WithOnError(func(err error) {
-			log.Printf("[DISTLIMIT WARN] Redis Primary down, failing over to memory: %v", err)
+			log.Printf("[DISTLIMIT WARN] Redis down, failing over to memory: %v", err)
 		}),
 	)
 
@@ -217,28 +238,77 @@ func main() {
 
 	_, _ = limiter.AllowKey(context.Background(), "api_key_abc")
 }
-
 ```
 
 ---
 
-## 📊 Performance & Benchmarks
+### 4. Dynamic Policy Reloading & Multi-Tenant Tier Resolution
 
-Benchmarks executed on AMD 3020e Linux x86_64 (`go test -bench=. -benchmem ./algorithm/...`):
+Update global limits at runtime without restarts, and apply per-key tier overrides via `PolicyResolver`:
 
+```go
+// Lock-free O(1) runtime update — no restart, no lock contention
+limiter.UpdatePolicy(500, 1*time.Minute)
+
+// Multi-tenant PolicyResolver: VIP users get a higher quota
+type TierResolver struct{}
+
+func (r *TierResolver) ResolvePolicy(ctx context.Context, key string) (distlimit.Policy, bool) {
+	if strings.HasPrefix(key, "vip:") {
+		return distlimit.Policy{Limit: 5000, Window: 1 * time.Minute}, true
+	}
+	return distlimit.Policy{}, false // fallback to default
+}
+
+limiter, _ := distlimit.New(
+	driver,
+	distlimit.WithLimit(100),
+	distlimit.WithWindow(1*time.Minute),
+	distlimit.WithPolicyResolver(&TierResolver{}),
+)
 ```
-pkg: github.com/balramadan/distlimit/algorithm/*
-cpu: AMD 3020e with Radeon Graphics
 
-BenchmarkSlidingLog_EvaluateMemory-2         60,631,044    20.36 ns/op    0 B/op    0 allocs/op
-BenchmarkTokenBucket_EvaluateMemory-2        22,322,690    46.18 ns/op    0 B/op    0 allocs/op
-BenchmarkLeakyBucket_EvaluateMemory-2        22,839,754    47.76 ns/op    0 B/op    0 allocs/op
-BenchmarkFixedWindow_EvaluateMemory-2        14,618,232    77.27 ns/op    0 B/op    0 allocs/op
-BenchmarkSlidingCounter_EvaluateMemory-2      8,917,860   129.10 ns/op    0 B/op    0 allocs/op
+---
 
+### 5. OpenTelemetry Instrumentation
+
+```go
+import (
+	distotel "github.com/balramadan/distlimit/metrics/otel"
+	"go.opentelemetry.io/otel"
+)
+
+otelObserver := distotel.NewObserver(
+	distotel.WithMeterProvider(otel.GetMeterProvider()),
+)
+
+limiter, _ := distlimit.New(
+	driver,
+	distlimit.WithMetricObserver(otelObserver),
+)
 ```
 
-> **Key Takeaway:** All 5 algorithms achieve **zero memory allocations (`0 B/op`, `0 allocs/op`)** during in-memory evaluation, allowing your Go application to handle tens of millions of rate-check operations per second without GC pause overhead.
+---
+
+### 6. Route Labeling for All Middleware Adapters
+
+Pass the parametrized route pattern (e.g., `/api/v1/users/:id`) or gRPC `FullMethod` into metric labels automatically:
+
+```go
+// net/http — uses r.Pattern (Go 1.22+) or fallback to r.URL.Path
+distlimitnethttp.New(limiter, distlimitnethttp.WithRouteLabeling(true))
+
+// Gin — uses c.FullPath()
+distlimitgin.New(limiter, distlimitgin.WithRouteLabeling(true))
+
+// Echo v4 — uses c.Path()
+distlimitecho.New(limiter, distlimitecho.WithRouteLabeling(true))
+
+// gRPC — uses info.FullMethod (e.g. /package.Service/Method)
+grpc.NewServer(grpc.ChainUnaryInterceptor(
+	distlimitgrpc.UnaryServerInterceptor(limiter, distlimitgrpc.WithRouteLabeling(true)),
+))
+```
 
 ---
 
@@ -246,12 +316,36 @@ BenchmarkSlidingCounter_EvaluateMemory-2      8,917,860   129.10 ns/op    0 B/op
 
 `distlimit` provides native, zero-dependency middleware adapters for all popular Go web frameworks:
 
-- ⚡ [`middleware/fiber`](https://www.google.com/search?q=middleware/fiber) — Fiber v3
-- 🍸 [`middleware/gin`](https://www.google.com/search?q=middleware/gin) — Gin Framework
-- 🔊 [`middleware/echo`](https://www.google.com/search?q=middleware/echo) — Echo v4
-- 🔊 [`middleware/echov5`](https://www.google.com/search?q=middleware/echov5) — Echo v5
-- 🌐 [`middleware/nethttp`](https://www.google.com/search?q=middleware/nethttp) — Standard `net/http` & Chi
-- 📡 [`middleware/grpc`](https://www.google.com/search?q=middleware/grpc) — gRPC Unary & Streaming Interceptors
+| Framework              | Import Path                                          | Route Labeling            |
+| ---------------------- | ---------------------------------------------------- | ------------------------- |
+| ⚡ Fiber v3            | `github.com/balramadan/distlimit/middleware/fiber`   | `WithRouteLabeling(true)` |
+| 🍸 Gin                 | `github.com/balramadan/distlimit/middleware/gin`     | `WithRouteLabeling(true)` |
+| 🔊 Echo v4             | `github.com/balramadan/distlimit/middleware/echo`    | `WithRouteLabeling(true)` |
+| 🔊 Echo v5             | `github.com/balramadan/distlimit/middleware/echov5`  | `WithRouteLabeling(true)` |
+| 🌐 Standard `net/http` | `github.com/balramadan/distlimit/middleware/nethttp` | `WithRouteLabeling(true)` |
+| 📡 gRPC                | `github.com/balramadan/distlimit/middleware/grpc`    | `WithRouteLabeling(true)` |
+
+---
+
+## 📊 Performance & Benchmarks
+
+Benchmarks executed on AMD 3020e Linux x86_64 (`go test -bench=. -benchmem -count=1 ./algorithm/... ./...`):
+
+```
+pkg: github.com/balramadan/distlimit/algorithm/*
+cpu: AMD 3020e with Radeon Graphics
+
+BenchmarkSlidingLog_EvaluateMemory-2        46,176,700    22.37 ns/op    0 B/op    0 allocs/op
+BenchmarkTokenBucket_EvaluateMemory-2       22,270,572    49.59 ns/op    0 B/op    0 allocs/op
+BenchmarkLeakyBucket_EvaluateMemory-2       23,049,756    67.77 ns/op    0 B/op    0 allocs/op
+BenchmarkFixedWindow_EvaluateMemory-2       14,373,084   106.30 ns/op    0 B/op    0 allocs/op
+BenchmarkSlidingCounter_EvaluateMemory-2     6,060,211   214.00 ns/op    0 B/op    0 allocs/op
+
+-- Full Limiter Stack (driver + algorithm + policy evaluation) --
+BenchmarkLimiter_NoObserver-2                  311,350   3,446.00 ns/op  0 B/op    0 allocs/op
+```
+
+> **Key Takeaway:** All 5 algorithms achieve **zero memory allocations (`0 B/op`, `0 allocs/op`)** during in-memory evaluation, allowing your Go application to handle tens of millions of rate-check operations per second without GC pause overhead. The full limiter stack including driver + algorithm + atomic policy evaluation also maintains **`0 B/op`** — and so does the telemetry observer path when disabled.
 
 ---
 
