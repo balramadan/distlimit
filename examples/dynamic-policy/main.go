@@ -59,7 +59,7 @@ func main() {
 	apiHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		userType := r.Header.Get("X-User-Type")
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(fmt.Sprintf(`{"status":"success","message":"Access granted for user type: %s"}`, userType)))
+		_, _ = fmt.Fprintf(w, `{"status":"success","message":"Access granted for user type: %s"}`, userType)
 	})
 
 	// Setup Rate Limiting Middleware dengan Custom Key Extraction
