@@ -9,13 +9,15 @@ import (
 	"strings"
 
 	"github.com/balramadan/distlimit"
+	"github.com/balramadan/distlimit/metrics"
 	"github.com/gofiber/fiber/v3"
 )
 
 // Config holds configuration parameters for the Fiber rate limit middleware.
 type Config struct {
-	trustedProxies []string
-	keyFunc        func(c fiber.Ctx) string
+	trustedProxies     []string
+	keyFunc            func(c fiber.Ctx) string
+	enableRouteLabeling bool
 }
 
 // Option configures functional parameters for the Fiber rate limit middleware.
@@ -32,6 +34,13 @@ func WithTrustedProxies(proxies []string) Option {
 func WithKeyFunc(fn func(c fiber.Ctx) string) Option {
 	return func(cfg *Config) {
 		cfg.keyFunc = fn
+	}
+}
+
+// WithRouteLabeling enables passing the Fiber route path pattern (e.g. /api/v1/users/:id) as the route label in telemetry events.
+func WithRouteLabeling(enable bool) Option {
+	return func(cfg *Config) {
+		cfg.enableRouteLabeling = enable
 	}
 }
 
@@ -84,6 +93,15 @@ func New(limiter *distlimit.Limiter, opts ...Option) fiber.Handler {
 	}
 
 	return func(c fiber.Ctx) error {
+		ctx := c.Context()
+		if cfg.enableRouteLabeling {
+			path := c.Route().Path
+			if path == "" {
+				path = c.Path()
+			}
+			ctx = metrics.ContextWithRoute(ctx, path)
+		}
+
 		var key string
 		if cfg.keyFunc != nil {
 			key = cfg.keyFunc(c)
@@ -91,7 +109,7 @@ func New(limiter *distlimit.Limiter, opts ...Option) fiber.Handler {
 			key = ExtractClientIP(c, cfg.trustedProxies)
 		}
 
-		res, err := limiter.AllowKey(c.Context(), key)
+		res, err := limiter.AllowKey(ctx, key)
 		if err != nil {
 			// Fail-Open Strategy
 			return c.Next()

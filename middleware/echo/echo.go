@@ -9,12 +9,14 @@ import (
 	"strings"
 
 	"github.com/balramadan/distlimit"
+	"github.com/balramadan/distlimit/metrics"
 	"github.com/labstack/echo/v4"
 )
 
 type Config struct {
-	trustedProxies []string
-	keyFunc        func(c echo.Context) string
+	trustedProxies     []string
+	keyFunc            func(c echo.Context) string
+	enableRouteLabeling bool
 }
 
 type Option func(*Config)
@@ -30,6 +32,13 @@ func WithTrustedProxies(proxies []string) Option {
 func WithKeyFunc(fn func(c echo.Context) string) Option {
 	return func(cfg *Config) {
 		cfg.keyFunc = fn
+	}
+}
+
+// WithRouteLabeling enables passing the Echo route path pattern (e.g. /api/v1/users/:id) as the route label in telemetry events.
+func WithRouteLabeling(enable bool) Option {
+	return func(cfg *Config) {
+		cfg.enableRouteLabeling = enable
 	}
 }
 
@@ -85,6 +94,16 @@ func New(limiter *distlimit.Limiter, opts ...Option) echo.MiddlewareFunc {
 
 	return func(next echo.HandlerFunc) echo.HandlerFunc {
 		return func(c echo.Context) error {
+			ctx := c.Request().Context()
+			if cfg.enableRouteLabeling {
+				path := c.Path()
+				if path == "" {
+					path = c.Request().URL.Path
+				}
+				ctx = metrics.ContextWithRoute(ctx, path)
+				c.SetRequest(c.Request().WithContext(ctx))
+			}
+
 			var key string
 			if cfg.keyFunc != nil {
 				key = cfg.keyFunc(c)
@@ -92,7 +111,7 @@ func New(limiter *distlimit.Limiter, opts ...Option) echo.MiddlewareFunc {
 				key = ExtractClientIP(c, cfg.trustedProxies)
 			}
 
-			res, err := limiter.AllowKey(c.Request().Context(), key)
+			res, err := limiter.AllowKey(ctx, key)
 			if err != nil {
 				return next(c)
 			}
