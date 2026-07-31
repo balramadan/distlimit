@@ -9,13 +9,15 @@ import (
 	"strings"
 
 	"github.com/balramadan/distlimit"
+	"github.com/balramadan/distlimit/metrics"
 	"github.com/gin-gonic/gin"
 )
 
 // Config holds configuration parameters for the Gin rate limit middleware.
 type Config struct {
-	trustedProxies []string
-	keyFunc        func(c *gin.Context) string
+	trustedProxies     []string
+	keyFunc            func(c *gin.Context) string
+	enableRouteLabeling bool
 }
 
 // Option configures functional parameters for the Gin rate limit middleware.
@@ -32,6 +34,13 @@ func WithTrustedProxies(proxies []string) Option {
 func WithKeyFunc(fn func(c *gin.Context) string) Option {
 	return func(cfg *Config) {
 		cfg.keyFunc = fn
+	}
+}
+
+// WithRouteLabeling enables passing the Gin full route path pattern (e.g. /api/v1/users/:id) as the route label in telemetry events.
+func WithRouteLabeling(enable bool) Option {
+	return func(cfg *Config) {
+		cfg.enableRouteLabeling = enable
 	}
 }
 
@@ -87,6 +96,16 @@ func New(limiter *distlimit.Limiter, opts ...Option) gin.HandlerFunc {
 	}
 
 	return func(c *gin.Context) {
+		ctx := c.Request.Context()
+		if cfg.enableRouteLabeling {
+			route := c.FullPath()
+			if route == "" {
+				route = c.Request.URL.Path
+			}
+			ctx = metrics.ContextWithRoute(ctx, route)
+			c.Request = c.Request.WithContext(ctx)
+		}
+
 		var key string
 		if cfg.keyFunc != nil {
 			key = cfg.keyFunc(c)
@@ -94,7 +113,7 @@ func New(limiter *distlimit.Limiter, opts ...Option) gin.HandlerFunc {
 			key = ExtractClientIP(c, cfg.trustedProxies)
 		}
 
-		res, err := limiter.AllowKey(c.Request.Context(), key)
+		res, err := limiter.AllowKey(ctx, key)
 		if err != nil {
 			// Fail-Open Policy
 			c.Next()

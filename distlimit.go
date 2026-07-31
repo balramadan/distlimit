@@ -6,10 +6,12 @@ package distlimit
 import (
 	"context"
 	"errors"
+	"sync/atomic"
 	"time"
 
 	"github.com/balramadan/distlimit/algorithm"
 	"github.com/balramadan/distlimit/algorithm/slidingcounter"
+	"github.com/balramadan/distlimit/metrics"
 )
 
 // Result is a type alias for algorithm.Result for backward compatibility with v1.0.0.
@@ -50,10 +52,12 @@ type Driver interface {
 
 // Config holds configuration parameters used during Limiter construction.
 type Config struct {
-	limit     int64
-	window    time.Duration
-	algorithm algorithm.Algorithm
-	keyFunc   KeyFunc
+	limit          int64
+	window         time.Duration
+	algorithm      algorithm.Algorithm
+	keyFunc        KeyFunc
+	observer       metrics.Observer
+	policyResolver PolicyResolver
 }
 
 // Option configures functional parameters for Limiter initialization.
@@ -89,16 +93,35 @@ func WithKeyFunc(fn KeyFunc) Option {
 	}
 }
 
+// WithMetricObserver sets a custom telemetry/metrics observer for recording evaluation events.
+func WithMetricObserver(obs metrics.Observer) Option {
+	return func(c *Config) {
+		if obs != nil {
+			c.observer = obs
+		}
+	}
+}
+
+// WithPolicyResolver sets a dynamic policy resolver for evaluating tier-based rate limits per key.
+func WithPolicyResolver(resolver PolicyResolver) Option {
+	return func(c *Config) {
+		if resolver != nil {
+			c.policyResolver = resolver
+		}
+	}
+}
+
 // Limiter is the central rate limiting coordinator. It combines a storage Driver, rate rules,
 // and an algorithm strategy to evaluate incoming requests.
 //
 // Limiter is thread-safe and designed for concurrent use by multiple goroutines.
 type Limiter struct {
-	driver    Driver
-	limit     int64
-	window    time.Duration
-	algorithm algorithm.Algorithm
-	keyFunc   KeyFunc
+	driver         Driver
+	policy         atomic.Pointer[Policy]
+	algorithm      algorithm.Algorithm
+	keyFunc        KeyFunc
+	observer       metrics.Observer
+	policyResolver PolicyResolver
 }
 
 // New creates and initializes a new Limiter instance with the specified storage driver and optional options.
@@ -134,13 +157,30 @@ func New(driver Driver, opts ...Option) (*Limiter, error) {
 		cfg.algorithm = slidingcounter.New()
 	}
 
-	return &Limiter{
-		driver:    driver,
-		limit:     cfg.limit,
-		window:    cfg.window,
-		algorithm: cfg.algorithm,
-		keyFunc:   cfg.keyFunc,
-	}, nil
+	l := &Limiter{
+		driver:         driver,
+		algorithm:      cfg.algorithm,
+		keyFunc:        cfg.keyFunc,
+		observer:       cfg.observer,
+		policyResolver: cfg.policyResolver,
+	}
+
+	l.policy.Store(&Policy{
+		Limit:  cfg.limit,
+		Window: cfg.window,
+	})
+
+	return l, nil
+}
+
+// UpdatePolicy updates the default rate limit policy atomically at runtime without lock contention.
+func (l *Limiter) UpdatePolicy(limit int64, window time.Duration) {
+	if limit > 0 && window > 0 {
+		l.policy.Store(&Policy{
+			Limit:  limit,
+			Window: window,
+		})
+	}
 }
 
 // Allow evaluates the rate limit key extracted via the configured KeyFunc against the active limits.
@@ -149,7 +189,7 @@ func (l *Limiter) Allow(ctx context.Context) (Result, error) {
 	if key == "" {
 		key = "global"
 	}
-	return l.driver.Allow(ctx, key, l.limit, l.window, l.algorithm)
+	return l.AllowKey(ctx, key)
 }
 
 // AllowKey evaluates the rate limit for an explicitly specified key string against the active limits.
@@ -157,7 +197,46 @@ func (l *Limiter) AllowKey(ctx context.Context, key string) (Result, error) {
 	if key == "" {
 		key = "global"
 	}
-	return l.driver.Allow(ctx, key, l.limit, l.window, l.algorithm)
+
+	activePolicy := *l.policy.Load()
+	if l.policyResolver != nil {
+		if dynamicPolicy, ok := l.policyResolver.ResolvePolicy(ctx, key); ok && dynamicPolicy.Limit > 0 && dynamicPolicy.Window > 0 {
+			activePolicy = dynamicPolicy
+		}
+	}
+
+	var start time.Time
+	if l.observer != nil {
+		start = time.Now()
+	}
+
+	res, err := l.driver.Allow(ctx, key, activePolicy.Limit, activePolicy.Window, l.algorithm)
+
+	if l.observer != nil {
+		l.observer.Observe(ctx, metrics.Event{
+			Key:       key,
+			Route:     metrics.RouteFromContext(ctx),
+			Allowed:   res.Allowed,
+			Limit:     res.Limit,
+			Remaining: res.Remaining,
+			ResetIn:   res.ResetIn,
+			Driver:    l.driverName(),
+			Algorithm: l.algorithm.Name(),
+			Duration:  time.Since(start),
+		})
+	}
+
+	return res, err
+}
+
+func (l *Limiter) driverName() string {
+	type nameable interface {
+		Name() string
+	}
+	if n, ok := l.driver.(nameable); ok {
+		return n.Name()
+	}
+	return "unknown"
 }
 
 // ResetKey clears the rate limit state for the specified key in the underlying storage driver.

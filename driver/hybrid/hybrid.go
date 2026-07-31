@@ -60,6 +60,14 @@ func New(primary, fallback distlimit.Driver, opts ...Option) *Driver {
 	return h
 }
 
+// Name returns the identifier string of the hybrid storage driver state.
+func (h *Driver) Name() string {
+	if h.isDown.Load() {
+		return "hybrid_fallback"
+	}
+	return "hybrid_primary"
+}
+
 // Allow evaluates the rate limit key against the primary driver if healthy.
 // If the primary driver is down, it uses a Half-Open Circuit Breaker to allow a single probing request
 // to test primary health after the cool-off duration, routing all other concurrent traffic to fallback.

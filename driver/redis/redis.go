@@ -47,6 +47,11 @@ func New(client redis.UniversalClient, opts ...Option) *Driver {
 	return d
 }
 
+// Name returns the unique identifier string of the Redis storage driver.
+func (d *Driver) Name() string {
+	return "redis"
+}
+
 // Allow evaluates the rate limit for a key using the Lua script provided by the algorithm strategy.
 // It sends evaluation parameters (limit, window, current timestamp) to Redis and parses the response.
 func (d *Driver) Allow(ctx context.Context, key string, limit int64, window time.Duration, alg algorithm.Algorithm) (algorithm.Result, error) {

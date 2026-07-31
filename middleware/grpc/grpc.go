@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/balramadan/distlimit"
+	"github.com/balramadan/distlimit/metrics"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
@@ -19,8 +20,9 @@ import (
 type KeyExtractor func(ctx context.Context) string
 
 type config struct {
-	trustedProxies []string
-	keyExtractor   KeyExtractor
+	trustedProxies      []string
+	keyExtractor        KeyExtractor
+	enableRouteLabeling bool
 }
 
 // Option configures functional parameters for the gRPC rate limit interceptors.
@@ -37,6 +39,13 @@ func WithTrustedProxies(proxies []string) Option {
 func WithKeyExtractor(fn KeyExtractor) Option {
 	return func(cfg *config) {
 		cfg.keyExtractor = fn
+	}
+}
+
+// WithRouteLabeling enables passing the gRPC FullMethod name (e.g. /package.Service/Method) as the route label in telemetry events.
+func WithRouteLabeling(enable bool) Option {
+	return func(cfg *config) {
+		cfg.enableRouteLabeling = enable
 	}
 }
 
@@ -110,6 +119,10 @@ func UnaryServerInterceptor(limiter *distlimit.Limiter, opts ...Option) grpc.Una
 		info *grpc.UnaryServerInfo,
 		handler grpc.UnaryHandler,
 	) (any, error) {
+		if cfg.enableRouteLabeling && info != nil {
+			ctx = metrics.ContextWithRoute(ctx, info.FullMethod)
+		}
+
 		var key string
 		if cfg.keyExtractor != nil {
 			key = cfg.keyExtractor(ctx)
@@ -160,6 +173,9 @@ func StreamServerInterceptor(limiter *distlimit.Limiter, opts ...Option) grpc.St
 		handler grpc.StreamHandler,
 	) error {
 		ctx := ss.Context()
+		if cfg.enableRouteLabeling && info != nil {
+			ctx = metrics.ContextWithRoute(ctx, info.FullMethod)
+		}
 
 		var key string
 		if cfg.keyExtractor != nil {
