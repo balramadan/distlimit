@@ -3,12 +3,11 @@
 package fiber
 
 import (
-	"net"
 	"net/http"
 	"strconv"
-	"strings"
 
 	"github.com/balramadan/distlimit"
+	"github.com/balramadan/distlimit/internal/xff"
 	"github.com/balramadan/distlimit/metrics"
 	"github.com/gofiber/fiber/v3"
 )
@@ -47,41 +46,12 @@ func WithRouteLabeling(enable bool) Option {
 // ExtractClientIP securely extracts the client's real IP address from a Fiber v3 fiber.Ctx.
 // Header values (X-Forwarded-For, X-Real-IP) are parsed only if c.IP() originates from a trusted proxy.
 func ExtractClientIP(c fiber.Ctx, trustedProxies []string) string {
-	remoteIP := c.IP()
-
-	if len(trustedProxies) == 0 {
-		return remoteIP
-	}
-
-	if isTrustedProxy(remoteIP, trustedProxies) {
-		if xff := c.Get("X-Forwarded-For"); xff != "" {
-			parts := strings.Split(xff, ",")
-			return strings.TrimSpace(parts[0])
-		}
-		if xri := c.Get("X-Real-IP"); xri != "" {
-			return strings.TrimSpace(xri)
-		}
-	}
-
-	return remoteIP
+	return xff.ClientIP(c.IP(),
+		c.Get("X-Forwarded-For"),
+		c.Get("X-Real-IP"),
+		trustedProxies)
 }
 
-func isTrustedProxy(ipStr string, trustedProxies []string) bool {
-	ip := net.ParseIP(ipStr)
-	if ip == nil {
-		return false
-	}
-	for _, cidr := range trustedProxies {
-		if cidr == ipStr {
-			return true
-		}
-		_, ipNet, err := net.ParseCIDR(cidr)
-		if err == nil && ipNet.Contains(ip) {
-			return true
-		}
-	}
-	return false
-}
 
 // New returns a fiber.Handler middleware for Fiber v3 configured with the specified distlimit.Limiter and options.
 func New(limiter *distlimit.Limiter, opts ...Option) fiber.Handler {

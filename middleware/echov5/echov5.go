@@ -3,12 +3,12 @@
 package echov5
 
 import (
-	"net"
 	"net/http"
 	"strconv"
 	"strings"
 
 	"github.com/balramadan/distlimit"
+	"github.com/balramadan/distlimit/internal/xff"
 	"github.com/balramadan/distlimit/metrics"
 	"github.com/labstack/echo/v5"
 )
@@ -47,44 +47,16 @@ func WithRouteLabeling(enable bool) Option {
 // ExtractClientIP securely extracts the client's real IP address from an Echo v5 *echo.Context.
 // Header values (X-Forwarded-For, X-Real-IP) are parsed only if RemoteAddr originates from a trusted proxy.
 func ExtractClientIP(c *echo.Context, trustedProxies []string) string {
-	remoteIP, _, err := net.SplitHostPort(c.Request().RemoteAddr)
-	if err != nil {
-		remoteIP = c.Request().RemoteAddr
+	req := c.Request()
+	if req == nil {
+		return ""
 	}
-
-	if len(trustedProxies) == 0 {
-		return remoteIP
-	}
-
-	if isTrustedProxy(remoteIP, trustedProxies) {
-		if xff := c.Request().Header.Get("X-Forwarded-For"); xff != "" {
-			parts := strings.Split(xff, ",")
-			return strings.TrimSpace(parts[0])
-		}
-		if xri := c.Request().Header.Get("X-Real-IP"); xri != "" {
-			return strings.TrimSpace(xri)
-		}
-	}
-
-	return remoteIP
+	return xff.ClientIP(req.RemoteAddr,
+		strings.Join(req.Header.Values("X-Forwarded-For"), ","),
+		req.Header.Get("X-Real-IP"),
+		trustedProxies)
 }
 
-func isTrustedProxy(ipStr string, trustedProxies []string) bool {
-	ip := net.ParseIP(ipStr)
-	if ip == nil {
-		return false
-	}
-	for _, cidr := range trustedProxies {
-		if cidr == ipStr {
-			return true
-		}
-		_, ipNet, err := net.ParseCIDR(cidr)
-		if err == nil && ipNet.Contains(ip) {
-			return true
-		}
-	}
-	return false
-}
 
 // New returns an echo.MiddlewareFunc compatible with Echo v5, configured with the specified distlimit.Limiter and options.
 func New(limiter *distlimit.Limiter, opts ...Option) echo.MiddlewareFunc {
