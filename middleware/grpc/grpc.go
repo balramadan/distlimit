@@ -4,10 +4,10 @@ package grpc
 
 import (
 	"context"
-	"net"
 	"strings"
 
 	"github.com/balramadan/distlimit"
+	"github.com/balramadan/distlimit/internal/xff"
 	"github.com/balramadan/distlimit/metrics"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -52,54 +52,26 @@ func WithRouteLabeling(enable bool) Option {
 // ExtractPeerIP securely extracts the client's peer network address from the gRPC context & incoming metadata.
 // Header metadata (x-forwarded-for, x-real-ip) is parsed only if the peer IP originates from a trusted proxy.
 func ExtractPeerIP(ctx context.Context, trustedProxies []string) string {
-	var remoteIP string
-
+	var remoteAddr string
 	if p, ok := peer.FromContext(ctx); ok && p.Addr != nil {
-		host, _, err := net.SplitHostPort(p.Addr.String())
-		if err != nil {
-			remoteIP = p.Addr.String()
-		} else {
-			remoteIP = host
-		}
+		remoteAddr = p.Addr.String()
 	} else {
 		return "unknown_peer"
 	}
 
-	if len(trustedProxies) == 0 {
-		return remoteIP
-	}
-
-	if isTrustedProxy(remoteIP, trustedProxies) {
-		if md, ok := metadata.FromIncomingContext(ctx); ok {
-			if xff := md.Get("x-forwarded-for"); len(xff) > 0 && xff[0] != "" {
-				parts := strings.Split(xff[0], ",")
-				return strings.TrimSpace(parts[0])
-			}
-			if xri := md.Get("x-real-ip"); len(xri) > 0 && xri[0] != "" {
-				return strings.TrimSpace(xri[0])
-			}
+	var xffVal, xriVal string
+	if md, ok := metadata.FromIncomingContext(ctx); ok {
+		if vals := md.Get("x-forwarded-for"); len(vals) > 0 {
+			xffVal = strings.Join(vals, ",")
+		}
+		if vals := md.Get("x-real-ip"); len(vals) > 0 {
+			xriVal = vals[0]
 		}
 	}
 
-	return remoteIP
+	return xff.ClientIP(remoteAddr, xffVal, xriVal, trustedProxies)
 }
 
-func isTrustedProxy(ipStr string, trustedProxies []string) bool {
-	ip := net.ParseIP(ipStr)
-	if ip == nil {
-		return false
-	}
-	for _, cidr := range trustedProxies {
-		if cidr == ipStr {
-			return true
-		}
-		_, ipNet, err := net.ParseCIDR(cidr)
-		if err == nil && ipNet.Contains(ip) {
-			return true
-		}
-	}
-	return false
-}
 
 // UnaryServerInterceptor returns a grpc.UnaryServerInterceptor that enforces rate limiting on incoming unary gRPC calls.
 // If the rate limit is exceeded, it returns a status error with code codes.ResourceExhausted.

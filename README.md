@@ -2,7 +2,7 @@
 
 [![Go Reference](https://pkg.go.dev/badge/github.com/balramadan/distlimit.svg)](https://pkg.go.dev/github.com/balramadan/distlimit)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Release](https://img.shields.io/badge/Release-v1.2.0-blue.svg)](https://github.com/balramadan/distlimit/releases/tag/v1.2.0)
+[![Release](https://img.shields.io/badge/Release-v1.2.1-blue.svg)](https://github.com/balramadan/distlimit/releases/tag/v1.2.1)
 
 **`distlimit`** is an ultra-high performance, distributed, pluggable rate-limiting library for Go. Engineered for microservices, high-concurrency APIs, and financial-grade applications requiring nanosecond-level execution speeds, zero memory allocation, and multi-tier failover capabilities — now with real-time observability and zero-downtime dynamic policy reloading.
 

@@ -3,12 +3,12 @@
 package nethttp
 
 import (
-	"net"
 	"net/http"
 	"strconv"
 	"strings"
 
 	"github.com/balramadan/distlimit"
+	"github.com/balramadan/distlimit/internal/xff"
 	"github.com/balramadan/distlimit/metrics"
 )
 
@@ -46,44 +46,12 @@ func WithRouteLabeling(enable bool) Option {
 // ExtractClientIP securely extracts the client's real IP address from an http.Request.
 // Header values (X-Forwarded-For, X-Real-IP) are parsed only if RemoteAddr originates from a trusted proxy.
 func ExtractClientIP(r *http.Request, trustedProxies []string) string {
-	remoteIP, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		remoteIP = r.RemoteAddr
-	}
-
-	if len(trustedProxies) == 0 {
-		return remoteIP
-	}
-
-	if isTrustedProxy(remoteIP, trustedProxies) {
-		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-			parts := strings.Split(xff, ",")
-			return strings.TrimSpace(parts[0])
-		}
-		if xri := r.Header.Get("X-Real-IP"); xri != "" {
-			return strings.TrimSpace(xri)
-		}
-	}
-
-	return remoteIP
+	return xff.ClientIP(r.RemoteAddr,
+		strings.Join(r.Header.Values("X-Forwarded-For"), ","),
+		r.Header.Get("X-Real-IP"),
+		trustedProxies)
 }
 
-func isTrustedProxy(ipStr string, trustedProxies []string) bool {
-	ip := net.ParseIP(ipStr)
-	if ip == nil {
-		return false
-	}
-	for _, cidr := range trustedProxies {
-		if cidr == ipStr {
-			return true
-		}
-		_, ipNet, err := net.ParseCIDR(cidr)
-		if err == nil && ipNet.Contains(ip) {
-			return true
-		}
-	}
-	return false
-}
 
 // New returns a standard net/http middleware adapter function `func(http.Handler) http.Handler` configured with the specified distlimit.Limiter and options.
 func New(limiter *distlimit.Limiter, opts ...Option) func(http.Handler) http.Handler {
